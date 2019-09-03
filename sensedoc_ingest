@@ -11,6 +11,7 @@ Usage:
 
 Options:
     -h            Display this help info
+    -i IID        Ingest participant IID only
     -v,--verbose  Provide more verbose output
 """
 import os
@@ -50,7 +51,7 @@ def remove_useless_files(fileset, iidstr):
     usable data.
     """
 
-    mention("Examining files for user: %s" % iidstr)
+    mention("Examining files for participant: %s" % iidstr)
     # Accel tables are MUCH denser and take a lot longer to scan.
     # So making the assumption that if the gps table contains good
     # dates and data, the accel table will as well. 
@@ -84,13 +85,13 @@ def remove_useless_files(fileset, iidstr):
                                           stat2[0], stat2[1]):
                 spanstr = "   %s - %s\n   %s - %s"%(stat1[0], stat1[1], 
                                                 stat2[0], stat2[1])
-                print("Overlapping timestamps found for user %s:\n%s" % (iidstr,spanstr))
+                print("Overlapping timestamps found for participant %s:\n%s" % (iidstr,spanstr))
                 return None
         # total the number of samples from all files and
         # reject the participant if the number of samples does not
         # meet the minimum threshold
         if sum([x[2] for x in fstats]) < min_sample_threshold:
-            print("Not enough samples for user %s"%iidstr)
+            print("Not enough samples for participant %s"%iidstr)
             return None
         return good_files
     elif len(fileset) == 1:
@@ -99,24 +100,26 @@ def remove_useless_files(fileset, iidstr):
         if fstats[0][2] >= min_sample_threshold:
             return good_files
 
-    print("Insufficient usable data for user %s." % iidstr)
+    print("Insufficient usable data for participant %s." % iidstr)
     return None
 
 def ingest_sdb_file(filepath, iidstr):
     """
     Given an SDB datafile, load its tables into the database,
     tagged with the iid of the participant who produced it.
+    Return True if file ingested properly, False otherwise
     """
-    # refDate = "2017-06-07 05:21:14"
     refDate = ''
-    # conn = sqlite3.connect(fpath)
     with sqlite3.connect(filepath) as conn:
         # get the reference date from the SDB from which all 
         # timestamps are measured
         c = conn.cursor()
         c.execute("SELECT value FROM ancillary WHERE key='refDate'")
         refDate = c.fetchone()[0]
-        print("Extracted refDate of: %s"% refDate)
+
+    if not refDate:
+        print("Unable to get refDate from file %s"%filepath)
+        return False
 
     # Now we have everything we need to ingest the datafile. 
     # On the command line we could run a piped command to
@@ -165,13 +168,17 @@ def ingest_sdb_file(filepath, iidstr):
         # that the .0 is important at the end of the divisor constant, to
         # preserve the floating-point nature of the result.
 
-    cmdline = 'sqlite3 %s "%s" | psql %s -c "%s"' % (filepath,
-                                                    selectionsql,
-                                                    dbname,
-                                                    copycmd)
+    cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath,
+                                                        selectionsql,
+                                                        dbname,
+                                                        copycmd)
+    mention("Command line: %s" % cmdline)
+    res = sub.call(cmdline, shell=True)
+    if res:
+        print("Ingesting file %s produced return code: %s"%res)
+        return False
 
-    print("Command line: %s" % cmdline)
-    sub.call(cmdline, shell=True)
+    return True
 
 
 def ingest_user_directory(rootdir, iidstr):
@@ -180,9 +187,9 @@ def ingest_user_directory(rootdir, iidstr):
     perform basic acceptance tests on the data files in that dir and
     if they pass, load them into the database, tagged with the iid.
     """
-    if not iidstr.endswith('90'):
-        return
-    print("WARNING: IID filter active. Only accepting .*90.sdb")
+    # if not iidstr.endswith('90'):
+    #     return
+    # print("WARNING: IID filter active. Only accepting .*90.sdb")
     dirpath = os.path.join(rootdir, iidstr)
     mention("Attempting ingest on directory: %s" % dirpath)
 
@@ -202,30 +209,27 @@ def ingest_user_directory(rootdir, iidstr):
     ingest_files = remove_useless_files(candidate_files, iidstr)
 
     if not ingest_files:
-        print("No usable files found for user %s"%iidstr)
-        return
+        print("No usable files found for participant %s"%iidstr)
+        return False
 
     mention("Directory contains ingestible files.")
 
     # now actually ingest the datafiles
+    success = True
     for sdbfile in ingest_files:
-        ingest_sdb_file(filepath, iidstr)
+        success = success and ingest_sdb_file(filepath, iidstr)
     
-    """
-    Create SQL code to ingest from sqlite.
-        For table in ['gps','accel']:
-            Merge contents of multiple devices
-                (Nec? Why not just append the samples?)
-            Reject overlapping sample intervals
-            Remove duplicate entries
-            Cull files that are too small.
-            Ignore records that are bogus
-            Fill/ignore missing columns
-    """
+    return success
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
     # print(args)
+
+    # process ingest restrictions
+    target_iids = []
+    if args['-i']:
+        target_iids.append(args['-i'])
+        print("WARNING: Limiting ingest to IIDs " + ','.join(target_iids))
 
     rootdir = '.'
     if args['DIRPATH']:
@@ -238,5 +242,9 @@ if __name__ == '__main__':
     # interact_id. The directory name is the participant's iid,
     # and the file within that directory is {iid}.sdb
     for dirpath in os.listdir(rootdir):
-        ingest_user_directory(rootdir, dirpath)
+        if not target_iids or dirpath in target_iids:
+            if ingest_user_directory(rootdir, dirpath):
+                print("Participant %s ingested successfully."%dirpath)
+            else:
+                print("Problem ingesting participant %s"%dirpath)
 
