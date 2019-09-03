@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+This script walks a directory tree to find all the SenseDoc .sdb 
+files matching a particular filename pattern and ingests them into 
+a PostgreSQL database.
+
+Usage:
+  sensedoc_ingest [options] DIRPATH
+  sensedoc_ingest -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -v,--verbose  Provide more verbose output
+"""
+import os
+import sqlite3
+import subprocess as sub
+from docopt import docopt
+from itertools import combinations
+
+# number of GPS samples a participant must have across all their
+# data files to be included in the database
+min_sample_threshold = 10000
+dbname = 'interact_db'
+
+def mention(str):
+    if args['--verbose']:
+        print(str)
+
+def err(str):
+    print("ERR: %s"%str)
+    exit(1)
+
+def test_overlapping_daterange(dt1_st, dt1_end, dt2_st, dt2_end):
+    return not (dt1_end < dt2_st or dt1_st > dt2_end)
+    # return not (dt1_st < dt2_end and dt1_end >dt2_st)
+
+def remove_useless_files(fileset, iidstr):
+    """
+    Given a list of SDB filenames for a single participant,
+    perform basic acceptability tests on their contents.
+    If the directory contains acceptable data, return the 
+    list of acceptable files. Otherwise, return None.
+
+    A participant's entire folder is considered unacceptable if:
+        - the timespans of two or more datafiles overlap
+        - the total number of samples across all the files < threshold
+    A specific file is removed from consideration if it contains no
+    usable data.
+    """
+
+    mention("Examining files for user: %s" % iidstr)
+    # Accel tables are MUCH denser and take a lot longer to scan.
+    # So making the assumption that if the gps table contains good
+    # dates and data, the accel table will as well. 
+    sql = """
+            SELECT MIN(utcdate) as mindate,
+                    MAX(utcdate) as maxdate,
+                    COUNT(*) as count
+            FROM gps
+            """
+    fstats = []
+    good_files = []
+    for fpath in fileset:
+        conn = sqlite3.connect(fpath)
+        c = conn.cursor()
+        c.execute(sql)
+        mindate,maxdate,count = c.fetchone()
+        if mindate and maxdate and count:
+            fstats.append([mindate,maxdate,count])
+            good_files.append(fpath)
+        else:
+            mention("File %s unacceptable (%s, %s, %s)" % (fpath,
+                                                           mindate,
+                                                           maxdate,
+                                                           count))
+    if len(fileset) > 1:
+        # compare all possible pairings of files and reject 
+        # this participant if any pairs have overlap between 
+        # their min and max date stamps.
+        for stat1,stat2 in combinations(fstats,2):
+            if test_overlapping_daterange(stat1[0], stat1[1], 
+                                          stat2[0], stat2[1]):
+                spanstr = "   %s - %s\n   %s - %s"%(stat1[0], stat1[1], 
+                                                stat2[0], stat2[1])
+                print("Overlapping timestamps found for user %s:\n%s" % (iidstr,spanstr))
+                return None
+        # total the number of samples from all files and
+        # reject the participant if the number of samples does not
+        # meet the minimum threshold
+        if sum([x[2] for x in fstats]) < min_sample_threshold:
+            print("Not enough samples for user %s"%iidstr)
+            return None
+        return good_files
+    elif len(fileset) == 1:
+        # if there's only one file, there can't be any overlap
+        # so just look at record count
+        if fstats[0][2] >= min_sample_threshold:
+            return good_files
+
+    print("Insufficient usable data for user %s." % iidstr)
+    return None
+
+def ingest_sdb_file(filepath, iidstr):
+    """
+    Given an SDB datafile, load its tables into the database,
+    tagged with the iid of the participant who produced it.
+    """
+    # refDate = "2017-06-07 05:21:14"
+    refDate = ''
+    # conn = sqlite3.connect(fpath)
+    with sqlite3.connect(filepath) as conn:
+        # get the reference date from the SDB from which all 
+        # timestamps are measured
+        c = conn.cursor()
+        c.execute("SELECT value FROM ancillary WHERE key='refDate'")
+        refDate = c.fetchone()[0]
+        print("Extracted refDate of: %s"% refDate)
+
+    # Now we have everything we need to ingest the datafile. 
+    # On the command line we could run a piped command to
+    # pull data from the sqlite file and ingest it into the postgres
+    # DB. By using the sqlite3 and psql clients, which have both
+    # been optimized for CSV streaming, we can load the data into the
+    # DB much more efficiently than to load it into a Python script
+    # and then push it to the DB.
+    # The command line is:
+    # sqlite3 somefile.sdb "SELECT 'SOMEVALUE' as iid, 
+    #         strftime('%Y-%m-%d %H:%M:%f', 
+    #                  '2017-01-01 03:04:05',  ---Some refDate
+    #                  (ts/1000000.0)||' seconds') as ts, 
+    #         x, y, z 
+    #         FROM accel;"
+    # | psql DBNAME -c "COPY level_0.accel FROM STDIN delimiter '|' CSV;"
+
+    # Breaking this down into chunks, the command line becomes:
+    # sqlite3 SDBFILE SELECTIONSQL | psql DBNAME COPYCMD
+
+    # copycmd = "COPY level_0.accel FROM STDIN delimiter '|' CSV;"
+
+# CURRENTLY ALLOWS DUPLICATE TIMESTAMPED RECORDS THROUGH.
+# So, to process duplicates, we'll create a dummy table and load
+# the data into that, and then use INSERT ON CONFLICT to
+# append the dummy table to the live table, ignoring duplicates.
+    copycmd = """
+             CREATE TABLE level_0.deleteme (LIKE level_0.accel); 
+             COPY level_0.deleteme FROM STDIN delimiter '|' CSV;
+             INSERT INTO level_0.accel
+                SELECT * FROM level_0.deleteme
+                ON CONFLICT (iid,ts) DO NOTHING;
+             DROP TABLE level_0.deleteme;
+             """
+
+    selectionsql = """
+        SELECT '{}' AS iid, 
+                strftime('%Y-%m-%d %H:%M:%f', '{}', 
+                         (ts/1000000.0)||' seconds') as ts,
+                x, y, z 
+        FROM accel;
+        """.format(iidstr, refDate)
+        # NOTE: In the above SQL code, strftime() is used instead of 
+        # datetime() because datetime() truncates to seconds, whereas
+        # the strftime() with %f keeps fractional seconds. Also note
+        # that the .0 is important at the end of the divisor constant, to
+        # preserve the floating-point nature of the result.
+
+    cmdline = 'sqlite3 %s "%s" | psql %s -c "%s"' % (filepath,
+                                                    selectionsql,
+                                                    dbname,
+                                                    copycmd)
+
+    print("Command line: %s" % cmdline)
+    sub.call(cmdline, shell=True)
+
+
+def ingest_user_directory(rootdir, iidstr):
+    """
+    Given an interact_id number in string form and a path to a data dir,
+    perform basic acceptance tests on the data files in that dir and
+    if they pass, load them into the database, tagged with the iid.
+    """
+    if not iidstr.endswith('90'):
+        return
+    print("WARNING: IID filter active. Only accepting .*90.sdb")
+    dirpath = os.path.join(rootdir, iidstr)
+    mention("Attempting ingest on directory: %s" % dirpath)
+
+    # get a list of datafiles in this directory
+    candidate_files = []
+    for fname in os.listdir(dirpath):
+        filepath = os.path.join(dirpath, fname)
+        if fname.endswith('.sdb') and iidstr in filepath:
+            # then this is a sensedoc datafile
+            candidate_files.append(filepath)
+            mention("Adding target file: %s" % filepath)
+        else:
+            mention("Skipping target file: %s" % filepath)
+
+    # Perform basic acceptability tests on the candidate files
+    # and reject any files that do not meet standards
+    ingest_files = remove_useless_files(candidate_files, iidstr)
+
+    if not ingest_files:
+        print("No usable files found for user %s"%iidstr)
+        return
+
+    mention("Directory contains ingestible files.")
+
+    # now actually ingest the datafiles
+    for sdbfile in ingest_files:
+        ingest_sdb_file(filepath, iidstr)
+    
+    """
+    Create SQL code to ingest from sqlite.
+        For table in ['gps','accel']:
+            Merge contents of multiple devices
+                (Nec? Why not just append the samples?)
+            Reject overlapping sample intervals
+            Remove duplicate entries
+            Cull files that are too small.
+            Ignore records that are bogus
+            Fill/ignore missing columns
+    """
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+    # print(args)
+
+    rootdir = '.'
+    if args['DIRPATH']:
+        if not os.path.isdir(args['DIRPATH']):
+            err("Path %s is not a valid directory."%args['DIRPATH'])
+        rootdir = args['DIRPATH']
+    mention("Root directory: %s" % rootdir)
+
+    # The files we're looking for are organized in directories by
+    # interact_id. The directory name is the participant's iid,
+    # and the file within that directory is {iid}.sdb
+    for dirpath in os.listdir(rootdir):
+        ingest_user_directory(rootdir, dirpath)
+
