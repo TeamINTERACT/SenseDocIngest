@@ -5,6 +5,9 @@ This script walks a directory tree to find all the SenseDoc .sdb
 files matching a particular filename pattern and ingests them into 
 a PostgreSQL database.
 
+The status of each participant directory is logged to:
+    ./ingest-YYYYMMDD-HHMMSS.log
+
 Usage:
   sensedoc_ingest [options] DIRPATH
   sensedoc_ingest -h | --help | -V | --version
@@ -16,21 +19,32 @@ Options:
 """
 import os
 import sqlite3
+import datetime
 import subprocess as sub
 from docopt import docopt
 from itertools import combinations
+from pprint import pprint
+# from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 
 # number of GPS samples a participant must have across all their
 # data files to be included in the database
 min_sample_threshold = 10000
 dbname = 'interact_db'
+logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
+loghandle = None
+
+def log(str):
+    if loghandle:
+        loghandle.write(str + '\n')
+    if args['--verbose']:
+        print(str)
 
 def mention(str):
     if args['--verbose']:
         print(str)
 
 def err(str):
-    print("ERR: %s"%str)
+    log("ERR: %s"%str)
     exit(1)
 
 def test_overlapping_daterange(dt1_st, dt1_end, dt2_st, dt2_end):
@@ -85,13 +99,13 @@ def remove_useless_files(fileset, iidstr):
                                           stat2[0], stat2[1]):
                 spanstr = "   %s - %s\n   %s - %s"%(stat1[0], stat1[1], 
                                                 stat2[0], stat2[1])
-                print("Overlapping timestamps found for participant %s:\n%s" % (iidstr,spanstr))
+                log("Overlapping timestamps found for participant %s:\n%s" % (iidstr,spanstr))
                 return None
         # total the number of samples from all files and
         # reject the participant if the number of samples does not
         # meet the minimum threshold
         if sum([x[2] for x in fstats]) < min_sample_threshold:
-            print("Not enough samples for participant %s"%iidstr)
+            log("Not enough samples for participant %s"%iidstr)
             return None
         return good_files
     elif len(fileset) == 1:
@@ -100,8 +114,63 @@ def remove_useless_files(fileset, iidstr):
         if fstats[0][2] >= min_sample_threshold:
             return good_files
 
-    print("Insufficient usable data for participant %s." % iidstr)
+    log("Insufficient usable data for participant %s." % iidstr)
     return None
+
+def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
+    # Now we have everything we need to ingest the datafile. 
+    # On the command line we could run a piped command to
+    # pull data from the sqlite file and ingest it into the postgres
+    # DB. By using the sqlite3 and psql clients, which have both
+    # been optimized for CSV streaming, we can load the data into the
+    # DB much more efficiently than to load it into a Python script
+    # and then push it to the DB.
+    #
+    # In simple form, the console command is:
+    # sqlite3 SDBFILE SELECTIONSQL | psql DBNAME COPYCMD
+    #
+    # where SELECTIONSQL is:
+    #       "SELECT 'SOMEVALUE' as iid, 
+    #         strftime('%Y-%m-%d %H:%M:%f', 
+    #                  '2017-01-01 03:04:05',  ---Some refDate
+    #                  (ts/1000000.0)||' seconds') as ts, 
+    #         x, y, z 
+    #         FROM accel;"
+    #
+    # and COPYCMD is:
+    #       "COPY level_0.accel FROM STDIN delimiter '|' CSV;"
+    #
+    # That COPYCMD would do a simple ingest, directly into the table,
+    # but we also need to scrub out duplicate records, which occur in 
+    # the files occasionally due to a minor glitch in the firmware.
+    #
+    # So, to eliminate duplicates, we'll create a dummy table and load
+    # the data into that, and then use INSERT ON CONFLICT DO NOTHING to
+    # ignore duplicates as we copy the dummy table to the live table.
+    # print("Filepath: %s"%filepath)
+    # print("Tablename: %s"%tablename)
+    # print("PID: %s"%pid)
+    # tableid = '_%s_%s' % (tablename, pid)
+    tableid = ''
+    copycmd = """
+             CREATE TABLE level_0.deleteme{tid} (LIKE level_0.{tn}); 
+             COPY level_0.deleteme{tid} FROM STDIN delimiter '|' CSV;
+             INSERT INTO level_0.{tn}
+                SELECT * FROM level_0.deleteme{tid}
+                ON CONFLICT (iid,ts) DO NOTHING;
+             DROP TABLE level_0.deleteme{tid};
+             """.format(tn=tablename,tid=tableid)
+
+    cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath,
+                                                        selectionsql,
+                                                        dbname,
+                                                        copycmd)
+    mention("Command line: %s" % cmdline)
+    res = sub.call(cmdline, shell=True)
+    if res:
+        log("Ingesting file %s produced return code: %s"%(filepath,res))
+        return False
+    return True
 
 def ingest_sdb_file(filepath, iidstr):
     """
@@ -118,67 +187,54 @@ def ingest_sdb_file(filepath, iidstr):
         refDate = c.fetchone()[0]
 
     if not refDate:
-        print("Unable to get refDate from file %s"%filepath)
+        log("Unable to get refDate from file %s"%filepath)
         return False
 
-    # Now we have everything we need to ingest the datafile. 
-    # On the command line we could run a piped command to
-    # pull data from the sqlite file and ingest it into the postgres
-    # DB. By using the sqlite3 and psql clients, which have both
-    # been optimized for CSV streaming, we can load the data into the
-    # DB much more efficiently than to load it into a Python script
-    # and then push it to the DB.
-    # The command line is:
-    # sqlite3 somefile.sdb "SELECT 'SOMEVALUE' as iid, 
-    #         strftime('%Y-%m-%d %H:%M:%f', 
-    #                  '2017-01-01 03:04:05',  ---Some refDate
-    #                  (ts/1000000.0)||' seconds') as ts, 
-    #         x, y, z 
-    #         FROM accel;"
-    # | psql DBNAME -c "COPY level_0.accel FROM STDIN delimiter '|' CSV;"
+LOOK AT THE GITLAB CODE TO BE SURE ALL DEFAULTS AND ADJUSTMENTS ARE MADE
 
-    # Breaking this down into chunks, the command line becomes:
-    # sqlite3 SDBFILE SELECTIONSQL | psql DBNAME COPYCMD
-
-    # copycmd = "COPY level_0.accel FROM STDIN delimiter '|' CSV;"
-
-# CURRENTLY ALLOWS DUPLICATE TIMESTAMPED RECORDS THROUGH.
-# So, to process duplicates, we'll create a dummy table and load
-# the data into that, and then use INSERT ON CONFLICT to
-# append the dummy table to the live table, ignoring duplicates.
-    copycmd = """
-             CREATE TABLE level_0.deleteme (LIKE level_0.accel); 
-             COPY level_0.deleteme FROM STDIN delimiter '|' CSV;
-             INSERT INTO level_0.accel
-                SELECT * FROM level_0.deleteme
-                ON CONFLICT (iid,ts) DO NOTHING;
-             DROP TABLE level_0.deleteme;
-             """
-
-    selectionsql = """
-        SELECT '{}' AS iid, 
-                strftime('%Y-%m-%d %H:%M:%f', '{}', 
-                         (ts/1000000.0)||' seconds') as ts,
-                x, y, z 
-        FROM accel;
-        """.format(iidstr, refDate)
+    selectionsql = {'accel':"""
+                       SELECT '{}' AS iid, 
+                            strftime('%Y-%m-%d %H:%M:%f', '{}', 
+                                    (ts/1000000.0)||' seconds') as ts,
+                            x * 0.00390625 as x, ---scale factor 
+                            y * 0.00390625 as y, ---scale factor
+                            z * 0.00390625 as z  ---scale factor
+                       FROM accel;
+                       """.format(iidstr, refDate),
+                    'gps':"""
+                       SELECT '{}' AS iid, 
+                            strftime('%Y-%m-%d %H:%M:%f', '{}', 
+                                    (ts/1000000.0)||' seconds') as ts,
+                            lat, lon, speed, course, mode, fix, alt, 
+                            mode1, mode2, sat_used, 
+                            pdop, hdop, vdop, sat_in_view 
+                            FROM gps;
+                        """.format(iidstr, refDate)
+        }
         # NOTE: In the above SQL code, strftime() is used instead of 
         # datetime() because datetime() truncates to seconds, whereas
-        # the strftime() with %f keeps fractional seconds. Also note
-        # that the .0 is important at the end of the divisor constant, to
-        # preserve the floating-point nature of the result.
+        # the strftime() with %f keeps fractional seconds. 
+        # Also note that the .0 is important at the end of the 
+        # divisor constant, to preserve the floating-point nature 
+        # of the result.
 
-    cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath,
-                                                        selectionsql,
-                                                        dbname,
-                                                        copycmd)
-    mention("Command line: %s" % cmdline)
-    res = sub.call(cmdline, shell=True)
-    if res:
-        print("Ingesting file %s produced return code: %s"%res)
-        return False
+    # Now ingest each of the required tables into the DB
+    # If any table fails, the ingest for that participant should be 
+    # reported as unsuccessful.
+    success = True
+    argsets = []
+    for i,tbl in enumerate(selectionsql):
+        argsets.append([filepath, tbl, selectionsql[tbl], i])
+    # print("Argsets:")
+    # pprint(argsets)
 
-    return True
+    # now create multiple threads and dispatch them to run 
+    # execute_copy_via_shell() with each argset
+    # with PoolExecutor(max_workers=4) as executor:
+        # executor.map(execute_copy_via_shell, argsets)
+    for argset in argsets:
+        success = success and execute_copy_via_shell(*argset)
+    return success
 
 
 def ingest_user_directory(rootdir, iidstr):
@@ -189,7 +245,6 @@ def ingest_user_directory(rootdir, iidstr):
     """
     # if not iidstr.endswith('90'):
     #     return
-    # print("WARNING: IID filter active. Only accepting .*90.sdb")
     dirpath = os.path.join(rootdir, iidstr)
     mention("Attempting ingest on directory: %s" % dirpath)
 
@@ -209,7 +264,7 @@ def ingest_user_directory(rootdir, iidstr):
     ingest_files = remove_useless_files(candidate_files, iidstr)
 
     if not ingest_files:
-        print("No usable files found for participant %s"%iidstr)
+        log("No usable files found for participant %s"%iidstr)
         return False
 
     mention("Directory contains ingestible files.")
@@ -223,28 +278,29 @@ def ingest_user_directory(rootdir, iidstr):
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
-    # print(args)
+    log(args)
 
     # process ingest restrictions
     target_iids = []
     if args['-i']:
         target_iids.append(args['-i'])
-        print("WARNING: Limiting ingest to IIDs " + ','.join(target_iids))
+        print("WARNING: Ingesting only IIDs " + ','.join(target_iids))
 
     rootdir = '.'
     if args['DIRPATH']:
         if not os.path.isdir(args['DIRPATH']):
             err("Path %s is not a valid directory."%args['DIRPATH'])
         rootdir = args['DIRPATH']
-    mention("Root directory: %s" % rootdir)
+    log("Root directory: %s" % rootdir)
 
     # The files we're looking for are organized in directories by
     # interact_id. The directory name is the participant's iid,
     # and the file within that directory is {iid}.sdb
-    for dirpath in os.listdir(rootdir):
-        if not target_iids or dirpath in target_iids:
-            if ingest_user_directory(rootdir, dirpath):
-                print("Participant %s ingested successfully."%dirpath)
-            else:
-                print("Problem ingesting participant %s"%dirpath)
+    with open(logfile, 'w') as loghandle:
+        for dirpath in os.listdir(rootdir):
+            if not target_iids or dirpath in target_iids:
+                if ingest_user_directory(rootdir, dirpath):
+                    log("Participant %s ingested successfully."%dirpath)
+                else:
+                    log("Problem ingesting participant %s"%dirpath)
 
