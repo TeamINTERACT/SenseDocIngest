@@ -1,0 +1,63 @@
+When SD data comes from coordinators in batches, they are bundled within directories by IID.
+    - Can the same IID occur in more than one batch per wave?
+        If so, the archiving process needs to merge the folders and possibly rename sdb files to avoid collisions.
+
+If multiple SD devices were assigned to a single participant, will those be included in the same IID folder but with different names? Or will they appear in different folders in different batches?
+    - Again, the archiving process needs to know how to merge the folders.
+
+With incoming batch folders, can I trust that SDB files have been matched up properly to the correct user and placed in their folder?
+    - If not, then I'll have to verify the incoming sdb files and their time windows against the known sensedoc assignments managed by the coordinators in the Participant Portal.
+
+In the current ingest prototype:
+    Timestamps are duplicated: once in the raw usec timestamp and then
+    again in the truncated utcdate. I am currently merging both fields into a usecond-aware utcdate. Is there any reason to carry the raw microsecond timestamp as well? If so, wouldn't we also need to carry the refDate to make it meaningful?
+
+    Lat and Lon vals are range-tested against [-90, 90] and [-180, 180]
+    with outliers being dropped. Are there other fields that should
+    also be range-tested? Should outliers also be dropped?
+        speed >= 0?
+        course in [0,360]?
+        alt in [0,10000]?
+        etc.
+
+    Records with existing timestamps in gps or accel are being dropped, with the preserved record arbitrarily being the first one in the table. Is this the most appropriate record to preserve or is there a better selection criteria?
+
+    In both tables, timestamp and iid are required to be not null. Most other values are allowed to be null. Would it be better for us to establish default values for all these fields, rather than having all downstream algorithms need to worry about nulls?
+
+        This is my current version of the table constraints:
+
+        CREATE TABLE IF NOT EXISTS level_0.accel
+        (
+            iid bigint NOT NULL,
+            ts timestamp NOT NULL,
+            x INTEGER NOT NULL,
+            y INTEGER NOT NULL,
+            z INTEGER NOT NULL,
+            PRIMARY KEY(iid,ts)
+        );
+
+        CREATE TABLE IF NOT EXISTS level_0.gps
+        (
+            iid bigint NOT NULL,
+            ts timestamp NOT NULL,
+            lat double precision NOT NULL,
+            lon double precision NOT NULL,
+            speed real NOT NULL,
+            course real NOT NULL,
+            mode char(1) DEFAULT '',
+            fix char(1) DEFAULT '',
+            alt real NOT NULL,
+            mode1 char(1) DEFAULT '',
+            mode2 real NOT NULL,
+            sat_used real NOT NULL,
+            pdop real NOT NULL,
+            hdop real NOT NULL,
+            vdop real NOT NULL,
+            sat_in_view integer DEFAULT -1 
+        );
+
+        But there are definitely null values in the tables, so
+        importing to this definition will require either:
+            - default values
+            - dropping nulls
+            - remove the non-null constraints

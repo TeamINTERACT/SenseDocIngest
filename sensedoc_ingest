@@ -51,14 +51,14 @@ def test_overlapping_daterange(dt1_st, dt1_end, dt2_st, dt2_end):
     return not (dt1_end < dt2_st or dt1_st > dt2_end)
     # return not (dt1_st < dt2_end and dt1_end >dt2_st)
 
-def remove_useless_files(fileset, iidstr):
+def select_usable_files(fileset, iidstr):
     """
     Given a list of SDB filenames for a single participant,
     perform basic acceptability tests on their contents.
-    If the directory contains acceptable data, return the 
-    list of acceptable files. Otherwise, return None.
+    If the set contains acceptable data, return a list of them. 
+    Otherwise, return None.
 
-    A participant's entire folder is considered unacceptable if:
+    The entire set should be considered unacceptable if:
         - the timespans of two or more datafiles overlap
         - the total number of samples across all the files < threshold
     A specific file is removed from consideration if it contains no
@@ -67,8 +67,8 @@ def remove_useless_files(fileset, iidstr):
 
     mention("Examining files for participant: %s" % iidstr)
     # Accel tables are MUCH denser and take a lot longer to scan.
-    # So making the assumption that if the gps table contains good
-    # dates and data, the accel table will as well. 
+    # So to speed up the process, I'm assuming that if the gps table 
+    # contains good dates and data, the accel table will as well. 
     sql = """
             SELECT MIN(utcdate) as mindate,
                     MAX(utcdate) as maxdate,
@@ -78,19 +78,22 @@ def remove_useless_files(fileset, iidstr):
     fstats = []
     good_files = []
     for fpath in fileset:
+        # open the file and compute its date range and record count
         conn = sqlite3.connect(fpath)
         c = conn.cursor()
         c.execute(sql)
         mindate,maxdate,count = c.fetchone()
+
+        # make a note of those stats if they're usable
         if mindate and maxdate and count:
-            fstats.append([mindate,maxdate,count])
+            fstats.append([mindate,maxdate,count,fpath])
             good_files.append(fpath)
-        else:
+        else: # otherwise leave this file out of the list
             mention("File %s unacceptable (%s, %s, %s)" % (fpath,
                                                            mindate,
                                                            maxdate,
                                                            count))
-    if len(fileset) > 1:
+    if len(fstats) > 1:
         # compare all possible pairings of files and reject 
         # this participant if any pairs have overlap between 
         # their min and max date stamps.
@@ -99,7 +102,7 @@ def remove_useless_files(fileset, iidstr):
                                           stat2[0], stat2[1]):
                 spanstr = "   %s - %s\n   %s - %s"%(stat1[0], stat1[1], 
                                                 stat2[0], stat2[1])
-                log("Overlapping timestamps found for participant %s:\n%s" % (iidstr,spanstr))
+                log("Overlapping timestamps found between:\n  %s\n  %s" % (stat1[3],stat2[3]))
                 return None
         # total the number of samples from all files and
         # reject the participant if the number of samples does not
@@ -108,7 +111,7 @@ def remove_useless_files(fileset, iidstr):
             log("Not enough samples for participant %s"%iidstr)
             return None
         return good_files
-    elif len(fileset) == 1:
+    elif len(fstats) == 1:
         # if there's only one file, there can't be any overlap
         # so just look at record count
         if fstats[0][2] >= min_sample_threshold:
@@ -118,31 +121,45 @@ def remove_useless_files(fileset, iidstr):
     return None
 
 def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
-    # Now we have everything we need to ingest the datafile. 
-    # On the command line we could run a piped command to
-    # pull data from the sqlite file and ingest it into the postgres
-    # DB. By using the sqlite3 and psql clients, which have both
-    # been optimized for CSV streaming, we can load the data into the
-    # DB much more efficiently than to load it into a Python script
-    # and then push it to the DB.
+    # Now we have everything we need to ingest the given datafile. 
+    # On the command line we could run a single command to
+    # pull data from the sqlite file with sqlite3 and ingest into the 
+    # postgres by piping the output directly to psql.
     #
-    # In simple form, the console command is:
-    # sqlite3 SDBFILE SELECTIONSQL | psql DBNAME COPYCMD
+    # In simple form, that console command would be:
+    # sqlite3 somefile.sdb SELECTIONSQL | psql interact_db INSERTSQL
     #
-    # where SELECTIONSQL is:
-    #       "SELECT 'SOMEVALUE' as iid, 
-    #         strftime('%Y-%m-%d %H:%M:%f', 
-    #                  '2017-01-01 03:04:05',  ---Some refDate
-    #                  (ts/1000000.0)||' seconds') as ts, 
-    #         x, y, z 
-    #         FROM accel;"
+    # The prototype did all of this work in a series of Python Pandas 
+    # scripts which made multiple passes of the datafiles to merge them
+    # clean them, and then push them into the DB. But the resulting 
+    # process was horribly slow. 
     #
-    # and COPYCMD is:
-    #       "COPY level_0.accel FROM STDIN delimiter '|' CSV;"
+    # This time, we're going to do it in a single pass of the data, and
+    # we'll employ the sqlite3 and psql clients to do the heavy lifting. 
+    # These tools have both been optimized for CSV streaming, and can 
+    # load the data into the DB much more efficiently.
     #
-    # That COPYCMD would do a simple ingest, directly into the table,
-    # but we also need to scrub out duplicate records, which occur in 
-    # the files occasionally due to a minor glitch in the firmware.
+    # In the simple form of the command line shown above, the two
+    # key elements are SELECTIONSQL, which is the SQL fragment used to
+    # select a table's content out of the target SQLite file, and the
+    # INSERTSQL, which is the SQL fragment used to load the incoming
+    # data into the PostgreSQL database.
+    # 
+    # In addition to doing the simple select/insert, these commands 
+    # will also handle many of the cleaning and normalization steps
+    # that need to be applied to the data before it can be used.
+    #
+    # Unfortunately, the data is known to contain occasional duplicate 
+    # records, due to a minor glitch in the capture hardware. So the 
+    # choice is to remove those duplicates at SELECT time, when reading
+    # them out of the sqlite file, or at INSERT time, when reading them
+    # into the database. 
+    #
+    # Eliminating them sooner would be preferable.
+    #    Running a test on a single file with 22 duplicates,
+    #    eliminating the duplicates at selection time added 1.1s to the
+    #    processing time for that file (1.7s vs 2.8s)
+    #    Running a test on duplicate removal at ingest time gave us
     #
     # So, to eliminate duplicates, we'll create a dummy table and load
     # the data into that, and then use INSERT ON CONFLICT DO NOTHING to
@@ -168,7 +185,9 @@ def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
     mention("Command line: %s" % cmdline)
     res = sub.call(cmdline, shell=True)
     if res:
-        log("Ingesting file %s produced return code: %s"%(filepath,res))
+        # If any table fails, the ingest for that participant should be 
+        # reported as unsuccessful.
+        log("Ingesting file %s failed with return code: %s"%(filepath,res))
         return False
     return True
 
@@ -190,18 +209,42 @@ def ingest_sdb_file(filepath, iidstr):
         log("Unable to get refDate from file %s"%filepath)
         return False
 
-LOOK AT THE GITLAB CODE TO BE SURE ALL DEFAULTS AND ADJUSTMENTS ARE MADE
+    # From the prototype system, the fuse_sd_pdata.py script contains
+    # a number of data scrubbing and polishing steps. These same steps
+    # need to be implemented in this newer (and hopefully faster) ingest
+    # system.
+    # - Reject filesets with overlapping time windows (and notify admin)
+    # X Add the participant's iid to every sample record
+    # X Merge the timestamps into one value with millisec precision
+    # X Scale the x,y,z values of the accel table
+    # - Set empty string as default value for all text and char fields
+    # - All fields must be NOT NULL and have sensible defaults
+    # - gps.lat must be between -90 and 90 inclusive
+    # - gps.lon must be between -180 and 180 inclusive
+    # - gps.sat_in_view to integer and default to -1
+    # - Reject records that duplicate existing value of iid,ts
+    #      Unfortunately, the records with duplicate timestamps are 
+    #      not duplicated in all fields, so we can't just do
+    #      a simple SAMPLE DISTINCT when exporting from the SQLite file.
+    #      Consequently, the most efficient solution I've found is to
+    #      load the file into a dummy DB table and then copy from there 
+    #      into the actual table with INSERT ON CONFLICT DO NOTHING.
+    #      It requires a second pass of the ingested data, but it's a
+    #      pretty efficient second pass.
 
-    selectionsql = {'accel':"""
-                       SELECT '{}' AS iid, 
-                            strftime('%Y-%m-%d %H:%M:%f', '{}', 
-                                    (ts/1000000.0)||' seconds') as ts,
-                            x * 0.00390625 as x, ---scale factor 
-                            y * 0.00390625 as y, ---scale factor
-                            z * 0.00390625 as z  ---scale factor
-                       FROM accel;
-                       """.format(iidstr, refDate),
-                    'gps':"""
+    # Each table in the SQLite file needs its own SELECT stmt
+    # to ensure data is read from the file in a known format.
+    selectionsql = {}
+    # selectionsql['accel'] = """
+    #                    SELECT '{}' AS iid, 
+    #                         strftime('%Y-%m-%d %H:%M:%f', '{}', 
+    #                                 (ts/1000000.0)||' seconds') as ts,
+    #                         x * 0.00390625 as x, ---scale factor 
+    #                         y * 0.00390625 as y, ---scale factor
+    #                         z * 0.00390625 as z  ---scale factor
+    #                    FROM accel;
+    #                    """.format(iidstr, refDate)
+    selectionsql['gps'] = """
                        SELECT '{}' AS iid, 
                             strftime('%Y-%m-%d %H:%M:%f', '{}', 
                                     (ts/1000000.0)||' seconds') as ts,
@@ -210,28 +253,28 @@ LOOK AT THE GITLAB CODE TO BE SURE ALL DEFAULTS AND ADJUSTMENTS ARE MADE
                             pdop, hdop, vdop, sat_in_view 
                             FROM gps;
                         """.format(iidstr, refDate)
-        }
-        # NOTE: In the above SQL code, strftime() is used instead of 
+        # NOTE: In the above queries, strftime() is used instead of 
         # datetime() because datetime() truncates to seconds, whereas
         # the strftime() with %f keeps fractional seconds. 
-        # Also note that the .0 is important at the end of the 
-        # divisor constant, to preserve the floating-point nature 
-        # of the result.
+        # Also note that the .0 is important at the end of 1000000.0, 
+        # to preserve the floating-point nature of the result.
 
-    # Now ingest each of the required tables into the DB
-    # If any table fails, the ingest for that participant should be 
-    # reported as unsuccessful.
+    # In a moment, we're going to ingest the individual files into the 
+    # DB, but to do it quickly, we're going to dispatch multiple 
+    # threads. In preparation for that step, we're going to
+    # pre-construct the set of parameters that will be passed to the
+    # actual ingestor function - one set for each invocation.
     success = True
     argsets = []
     for i,tbl in enumerate(selectionsql):
         argsets.append([filepath, tbl, selectionsql[tbl], i])
-    # print("Argsets:")
-    # pprint(argsets)
 
-    # now create multiple threads and dispatch them to run 
-    # execute_copy_via_shell() with each argset
-    # with PoolExecutor(max_workers=4) as executor:
-        # executor.map(execute_copy_via_shell, argsets)
+    # Now ingest each of the required tables into the DB.
+
+    # # Create multiple threads and dispatch them to run 
+    # # execute_copy_via_shell() with each argset
+    # # with PoolExecutor(max_workers=4) as executor:
+        # # executor.map(execute_copy_via_shell, argsets)
     for argset in argsets:
         success = success and execute_copy_via_shell(*argset)
     return success
@@ -261,7 +304,7 @@ def ingest_user_directory(rootdir, iidstr):
 
     # Perform basic acceptability tests on the candidate files
     # and reject any files that do not meet standards
-    ingest_files = remove_useless_files(candidate_files, iidstr)
+    ingest_files = select_usable_files(candidate_files, iidstr)
 
     if not ingest_files:
         log("No usable files found for participant %s"%iidstr)
