@@ -1,17 +1,17 @@
-CREATE TABLE IF NOT EXISTS level_0.accel
+CREATE TABLE IF NOT EXISTS level_0.sd_accel
 (
-    iid bigint NOT NULL,
-    ts timestamp NOT NULL,
-    x INTEGER NOT NULL,
-    y INTEGER NOT NULL,
-    z INTEGER NOT NULL,
+    iid bigint NOT NULL,   -- interact_id
+    ts timestamp NOT NULL, -- participant's local time
+    x double precision NOT NULL,
+    y double precision NOT NULL,
+    z double precision NOT NULL,
     PRIMARY KEY(iid,ts)
 );
 
-CREATE TABLE IF NOT EXISTS level_0.gps
+CREATE TABLE IF NOT EXISTS level_0.sd_gps
 (
-    iid bigint NOT NULL,
-    ts timestamp NOT NULL,
+    iid bigint NOT NULL,  -- interact_id
+    ts timestamp NOT NULL, -- participant's local time
     lat double precision NOT NULL,
     lon double precision NOT NULL,
     speed real NOT NULL,
