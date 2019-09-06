@@ -1,10 +1,10 @@
 New version:
 CREATE TABLE IF NOT EXISTS level_0.sd_accel (
-    iid bigint NOT NULL,
-    ts timestamp NOT NULL,
-    x double precision NOT NULL,
-    y double precision NOT NULL,
-    z double precision NOT NULL,
+    iid bigint NOT NULL,         -- shortened the name
+    ts timestamp NOT NULL,       -- removed redundant utcdate
+    x double precision NOT NULL, -- shortened the name
+    y double precision NOT NULL, -- shortened the name
+    z double precision NOT NULL, -- shortened the name
     PRIMARY KEY(iid,ts)
 );
 
@@ -24,20 +24,25 @@ New version:
 CREATE TABLE IF NOT EXISTS level_0.sd_gps (
     iid bigint NOT NULL,
     ts timestamp NOT NULL,
-    lat double precision NOT NULL,
+    lat double precision NOT NULL,  
     lon double precision NOT NULL,
-    speed real NOT NULL,
-    course real NOT NULL,
-    mode char(1) DEFAULT '',
-    fix char(1) DEFAULT '',
-    alt real NOT NULL,
-    mode1 char(1) DEFAULT '',
-    mode2 real NOT NULL,
-    sat_used tinyint NOT NULL,    -- converted from real
-    pdop real NOT NULL,
-    hdop real NOT NULL,
-    vdop real NOT NULL,
-    sat_in_view tinyint DEFAULT -1 -- converted from real
+
+--  Keep these
+    gps_speed real NOT NULL,  -- changed name
+    gps_course real NOT NULL, -- changed name
+    gps_alt real NOT NULL,    -- changed name
+    sat_used tinyint NOT NULL,       -- converted from real
+    sat_in_view tinyint DEFAULT -1,  -- converted from real
+
+ -- are these being used?
+    mode char(1) DEFAULT '',  -- check w Benoit
+    fix char(1) DEFAULT '',  -- check w Benoit
+    mode1 char(1) DEFAULT '',  -- check w Benoit
+    mode2 real NOT NULL,  -- check w Benoit
+    pdop real NOT NULL,  -- check w Benoit
+    hdop real NOT NULL,  -- check w Benoit
+    vdop real NOT NULL,  -- check w Benoit
+	PRIMARY KEY(iid, ts)
 );
 
 Old version:
@@ -95,16 +100,24 @@ Questions for data analysts and coders:
 
     Data Sufficiency
     ----------------
-        Data files were rejected by the prototype if they contained less than 10MB of data. I'm currently basing my minimum threshold on the number of GPS samples, which I've set to 3600, representing 1 hr of data. Is that a sensible cutoff?
+    KEEP AT 1 HOUR
+    ADD TO THE DATA DICTIONARY
+        Data files were rejected by the prototype if they contain less than 10MB of data. I'm currently basing my minimum threshold on the number of GPS samples, which I've set to 3600, representing 1 hr of data. Is that a sensible cutoff?
 
         This was a free calculation, since we already had to scan the file to get start and end times, but it's all based on the GPS table, which is 50 times smaller than the accel table and much faster to scan. Are we comfortable with assuming that if the GPS table has data, the accel table will as well?
+
+        Optimizations: 
+            SELECT * FROM gps ORDER BY TS LIMIT 1;
+            SELECT * FROM gps ORDER BY TS DESC LIMIT 1;
+            But then we wouldn't have count(*)
+                count(1) is MUCH faster than count(*)
 
     Column Validation
     -----------------
         Lat and Lon vals are range-tested against [-90, 90] and [-180, 180] with outliers being dropped. Are there other fields that should also be range-tested? Should outliers also be dropped?
             speed >= 0?
             course in [0,360]?
-            alt in [0,10000]?
+            alt in [-10000,10000]? assuming m
             etc.
 
         Accelerometer x, y and z data are provided as integers and then multiplied by a scale factor of 0.00390625 to convert it to a floating range of 0.0 - 1.0.
@@ -115,7 +128,9 @@ Questions for data analysts and coders:
                 -90 <= lat <= 90  
                 -180 <= lon <= 180
                 -10000 <= alt <= 10000
-                sat_used >= 3
+    sat_used > 0 -- Keep anything with at least 1 sat
+
+    PRODUCE A BEFORE AFTER REPORT OF HOW MANY RECORDS DROPPED
 
     Timestamp Hiccups
     -----------------
@@ -126,6 +141,9 @@ Questions for data analysts and coders:
             I've dumped sample cases from an sdb file that does this and can see no reliable pattern between the hiccup records. Some pairs show a change in precision for the lat/lon, but sometimes the higher precision is in the first and sometimes the second. Some pairs show a difference in number of satellites, but sometimes the higher precision is with more satellites and sometimes its with fewer.
 
             It seems common for there to be a difference in precision, but it is not universal. And 50% of the time, we're keeping the less precise reading and dropping the better one. That's why I'm wondering if we should combine them.
+        
+        KEEP THE FIRST BECAUSE ITS FASTEST and the data doesn't
+        suggest a better metric.
 
     NULL Values
     -----------
@@ -144,6 +162,12 @@ Questions for data analysts and coders:
 
         And if we're happy letting certain columns contain a null, should we consider dropping that column altogether?
 
+    IF LAT/LON are NULL - they SHOULD be ignorable
+
+    empty string for char data
+    signal value like -9999 for numeric
+
+    IF POSSIBLE USE NaN at INSERT TIME (POSS teh default value in the table declaratin.)
 
 
 
