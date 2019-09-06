@@ -39,6 +39,9 @@ dbname = 'interact_db'
 logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
+# number of processing threads to run
+num_threads = 1
+
 def log(msg):
     if loghandle:
         loghandle.write("%s\n" % msg)
@@ -89,28 +92,45 @@ def select_usable_files(filelist, iidstr):
     # contains good dates and data, the accel table will as well. 
     sql = """
             SELECT MIN(utcdate) as mindate,
-                    MAX(utcdate) as maxdate,
-                    COUNT(*) as count
+                   MAX(utcdate) as maxdate,
+                   COUNT(*) as count
             FROM gps
             """
+            # It turns out that the following 3 queries are MUCH
+            # faster than the one above, executing in about 1/8th 
+            # the time. And since there's a non-trivial amount of 
+            # time spent doing this, it's worth optimizing.
+    sql_min = "SELECT utcdate from gps order by ts ASC limit 1"
+    sql_max = "SELECT utcdate from gps order by ts DESC limit 1"
+    sql_n   = "SELECT count(1) as n from gps"
+
     fstats = []
     good_files = []
     for fpath in filelist:
         # open the file and compute its date range and record count
-        conn = sqlite3.connect(fpath)
-        c = conn.cursor()
-        c.execute(sql)
-        mindate,maxdate,count = c.fetchone()
+        try:
+            with sqlite3.connect(fpath) as conn:
+                c = conn.cursor()
+                c.execute(sql_min)
+                mindate = c.fetchone()[0]
+                c.execute(sql_max)
+                maxdate = c.fetchone()[0]
+                c.execute(sql_n)
+                count = c.fetchone()[0]
+        except Exception as e:
+            log("Caught a SQL error while counting records.")
+            log(e)
 
         # make a note of those stats if they're usable
         if mindate and maxdate and count:
             fstats.append([mindate,maxdate,count,fpath])
             good_files.append(fpath)
         else: # otherwise leave this file out of the list
-            mention("File %s unacceptable (%s, %s, %s)" % (fpath,
-                                                           mindate,
-                                                           maxdate,
-                                                           count))
+            log("File %s unacceptable (%s, %s, %s)" % (fpath,
+                                                        mindate,
+                                                        maxdate,
+                                                        count))
+
     if len(fstats) > 1:
         # compare all possible pairings of files and reject 
         # this filelist if any pair has overlap between 
@@ -357,7 +377,7 @@ def ingest_user_directory(argset): #rootdir, iidstr):
         # success = success and ingest_sdb_file(filepath, iidstr)
         argsets.append( [filepath, iidstr] )
 
-    with PoolExecutor(max_workers=4) as executor:
+    with PoolExecutor(max_workers=num_threads) as executor:
         resultlist = executor.map(ingest_sdb_file, argsets)
         success = all(resultlist)
     
@@ -403,7 +423,7 @@ if __name__ == '__main__':
                 # else:
                 #     log("Problem ingesting participant %s"%dirpath)
 
-        with PoolExecutor(max_workers=4) as executor:
+        with PoolExecutor(max_workers=num_threads) as executor:
             resultlist = executor.map(ingest_user_directory, argsets)
-            clean = all(resultlist)
+            # clean = all(resultlist)
 
