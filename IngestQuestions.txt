@@ -115,10 +115,15 @@ Questions for data analysts and coders:
     Column Validation
     -----------------
         Lat and Lon vals are range-tested against [-90, 90] and [-180, 180] with outliers being dropped. Are there other fields that should also be range-tested? Should outliers also be dropped?
-            speed >= 0?
-            course in [0,360]?
-            alt in [-10000,10000]? assuming m
+            speed >= 0?  (sample file ranges 0.0 - 77.33)
+            course in [0,360]? (-327.67 - 327.67)
+            alt in [-10000,10000]? assuming m (-1127.0, 3152.2)
             etc.
+
+            sat_used (0-26)
+            sat_in_view (9-12)
+            hdop (-1.0, 24.8)
+            pdop (-1.0, 22.6)
 
         Accelerometer x, y and z data are provided as integers and then multiplied by a scale factor of 0.00390625 to convert it to a floating range of 0.0 - 1.0.
 

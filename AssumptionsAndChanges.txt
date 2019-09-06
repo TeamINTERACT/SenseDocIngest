@@ -1,0 +1,78 @@
+This document summarizes the decisions and assumptions made regarding our handling of the incoming SenseDoc data during ingest. In particular, we're discussing changes to the ingest process first implemented by Janelle, in what we're referring to as the ingest prototype.
+
+File Handling
+-------------
+Perhaps the biggest change in the new process is the number of times we process each file. The prototype took an iterative approach, converting the SDB files into CSV, culling bad records, merging multiple files together for each participant, and then finally ingesting the resulting into the DB. This process read, wrote, and/or modified each datafile four or five times before it was fully ingested.
+
+By contrast, the new process reads each file just once, filtering and massaging the fields and records as part of the extraction from the SDB. But instead of storing the extracted file in an intermediate CSV on disk, it is fed directly into the DB as we read it.
+
+The result is many fewer "touches" to each record and much less time spent waiting for hard drives to read/write. This process should be significantly faster than the prototype and require much less disk storage for archiving purposes. The only potential problem is that if an ingest fails, we will have to reingest from scratch - there will be no intermediate-stage files on hand to serve as a checkpoint. 
+
+
+Redundant Dates
+---------------
+Previous versions of the ingest process preserved both the integer microsecond timestamp and the utc_date fields from the SenseDoc accelerometer table. But the timestamp field is incomplete without also knowing its reference date, which was is different for every device and not being captured. So for the sake of clarity and simplicity, they are being merged. Upon ingest, the microsecond and reference date information will be combined to produce a single utc timestamp with microsecond precision.
+
+
+Window Overlap
+--------------
+Currently, we assume that if a contributor has provided multiple data files (from different SenseDoc devices) the timespans of data they contain will not overlap, since an overlap suggests that they either wore both devices at the same time, or alternated between them.
+
+In the case where a participant's files overlap in this way, that participant's entire dataset is omitted and the problem is flagged in the ingest report.
+
+
+Local Time
+----------
+Maintaining date information in UTC time creates a number of complexities later, requiring analysts to constantly be converting from the UTC to the local timezones. It also requires them to consider regional variances in treatment of daylight savings time and a number of other timezone headaches. But encoding in UTC is only advantageous if the data are going to be synchronized between different cities, which we do not anticipate doing. 
+
+It seems that what is most germane our study is to record the timestamps in reference to the participant's own sense of what the time was, since they conduct their daily activities according to local clock time.
+
+To that end, we propose normalizing the data samples from each study to the timezone of the city the participant is enrolled with. If we do this once, at ingest time, it should allow all downstream analysis to ignore the usual timezone gymnastics.
+
+
+Redundant Timestamps
+--------------------
+There is a known glitch in SenseDoc devices that occasionally cause a small number of samples (typically 2-4) to be recorded with the same timestamp. After analysing a number of examples, we found no clear pattern by which any one record could be construed as "preferable" to the others. It is not the case that the first or last duplicate is always of higher precision, or has null fields, etc. We contemplated taking an average of these records rather than recording just one, but the benefits of doing so seem limited, especially when contrasted with the increased processing time that would be required to ingest every file.
+
+To that end, we have elected to continue with the protocol implemented in the prototype, by keeping the first record with any given timestamp and ignoring any duplicates that follow.
+
+
+Column Retention
+----------------
+After some discussion, we have determined that all the fields of the accelerometer table are required (aside from the utc_date discussed in the Redundant Dates section above) and will be ingested.
+
+This is not true, however, for the GPS table. Clearly the interact_id, timestamp, latitude, and longitude fields are essential. Additionally, the speed, course, and altitude are likely of potential research interest, and the sat_used and sat_in_view fields may be needed for estimating the quality of the location fix. Benoit has advised us that the pdop, hdop and vdop fields may also be required. But nobody has spoken in defence of the fix, mode, mode1, and mode2 fields.
+
+It is currently our intention to omit these from the ingest process, in favor of keeping the tables smaller. If you know any reason why those should be retained after all, now would be a good time to speak up about it.
+
+
+Data Sufficiency
+----------------
+The ingest prototype implemented a protocol whereby any file less than 10MB in size was omitted from the process on the grounds that it does not contain enough telemetry data to be of value.
+
+This was a reasonable cutoff for prototyping purposes, but for production, we have decided to use a more deliberated test. After merging the data from a participant's (potentially multiple) data files, any contribution that is less than 1 hour of total data will be omitted. (Specifically, any participant with fewer than 3600 GPS samples.)
+
+The objective is to eliminate data that is of no use to the project, but to keep everything else for later consideration.
+
+
+Column Sanity Checks
+--------------------
+The prototype also applied a few basic sanity checks to the records, rejecting any samples that seemed "impossible." Specifically, it checks to be sure that latitude values are between -90 and 90 degrees, and longitude between -180 and 180 degrees.
+
+We've added the following additional tests:
+    speed is between 0 and 1000 km/h.
+    course is between -360 and +360 degrees
+    altitude is between -10000 and 10000 meters
+    sat_used is between 0 and 50 satellites
+    sat_in_view is between 0 and 50 satellites
+
+We do not know of any appropriate sanity limits to test for in the case of: hdop, vdop and pdop, so those are not being tested.
+
+
+NULL Values
+-----------
+For a variety of reasons, SenseDoc data fields are occasionally NULL. For crucial fields (timestamp, lat, lon) a NULL value causes that record to be omitted from the ingest stream. But for most other fields, a NULL is treated more mercifully.
+
+For string/text fields, a NULL is encoded as a '' empty string. For numeric fields, a NULL will be entered as NaN.
+
+This way, researchers can still readily identify missing data, but will not have to worry about pre-scrubbing to deal with NULL values.
