@@ -1,19 +1,3 @@
-Questions for Zoe/Coordinators:
-	When SD data comes from coordinators in batches, they are bundled within directories by IID.
-		- Can the same IID occur in more than one batch per wave?
-			If so, the archiving process needs to merge the folders and possibly rename sdb files to avoid collisions.
-    ORGANIZED BY IID_SDID
-
-	If multiple SD devices were assigned to a single participant, will those be included in the same IID folder but with different fnames? Or will they appear in different folders in different batches?
-		- Again, the archiving process needs to know how to merge the folders.
-    ORGANIZED BY IID_SDID
-
-	With incoming batch folders, can I trust that SDB files have been matched up properly to the correct user and placed in their folder?
-		- If not, then I'll have to verify the incoming sdb files and their time windows against the known sensedoc assignments managed by the coordinators in the Participant Portal.
-        -
-    ORGANIZED BY IID_SDID
-
-
 New version:
 CREATE TABLE IF NOT EXISTS level_0.sd_accel (
     iid bigint NOT NULL,
@@ -49,11 +33,11 @@ CREATE TABLE IF NOT EXISTS level_0.sd_gps (
     alt real NOT NULL,
     mode1 char(1) DEFAULT '',
     mode2 real NOT NULL,
-    sat_used real NOT NULL,
+    sat_used tinyint NOT NULL,    -- converted from real
     pdop real NOT NULL,
     hdop real NOT NULL,
     vdop real NOT NULL,
-    sat_in_view integer DEFAULT -1 
+    sat_in_view tinyint DEFAULT -1 -- converted from real
 );
 
 Old version:
@@ -81,32 +65,373 @@ CREATE TABLE sd_gps_raw_test (
 
 Questions for data analysts and coders:
 
-	Can any fields be dropped, compressed, or packed?
 
-	In the current ingest prototype:
+    Redundant Timestamps
+    --------------------
+        Timestamps are duplicated: once in the raw usec timestamp and then again in the truncated utcdate. I am currently merging both fields into a usecond-aware utcdate. Is there any reason to carry the raw microsecond timestamp as well? If so, wouldn't we also need to carry the refDate to make it meaningful?
 
-	Timestamps are duplicated: once in the raw usec timestamp and then
-	again in the truncated utcdate. I am currently merging both fields into a usecond-aware utcdate. Is there any reason to carry the raw microsecond timestamp as well? If so, wouldn't we also need to carry the refDate to make it meaningful?
-    GO AHEAD AND ELIMINATE THE REDUNDANCY
+            GO AHEAD AND ELIMINATE THE REDUNDANCY
 
-	Lat and Lon vals are range-tested against [-90, 90] and [-180, 180]
-	with outliers being dropped. Are there other fields that should
-	also be range-tested? Should outliers also be dropped?
-		speed >= 0?
-		course in [0,360]?
-		alt in [0,10000]?
-		etc.
+    Column Retention
+    ----------------
+        Can any of these fields be dropped, compressed, or packed?
+            Clearly no:
+                iid, ts, lat, lon,
 
-	Records with existing timestamps (dups) in gps or accel are being dropped, with the preserved record arbitrarily being the first one in the table. Is this the most appropriate record to preserve or is there a better selection criteria?
+            Uncertain:
+                speed
+                course
+                mode
+                fix
+                alt
+                mode1
+                mode2
+                sat_used
+                pdop
+                hdop
+                vdop
+                sat_in_view
 
-	In both tables, timestamp and iid are required to be not null. Most other values are allowed to be null. Would it be better for us to establish default values for all these fields, rather than having all downstream algorithms need to worry about nulls?
 
-		If so, will need documentation on value profiles for gps
-		fields so I can establish approp defaults.
+    Data Sufficiency
+    ----------------
+        Data files were rejected by the prototype if they contained less than 10MB of data. I'm currently basing my minimum threshold on the number of GPS samples, which I've set to 3600, representing 1 hr of data. Is that a sensible cutoff?
 
-	But there are definitely null values in the tables, so
-	importing to this definition will require either:
-		- default values
-		- dropping nulls
-		- remove the non-null constraints
+        This was a free calculation, since we already had to scan the file to get start and end times, but it's all based on the GPS table, which is 50 times smaller than the accel table and much faster to scan. Are we comfortable with assuming that if the GPS table has data, the accel table will as well?
 
+    Column Validation
+    -----------------
+        Lat and Lon vals are range-tested against [-90, 90] and [-180, 180] with outliers being dropped. Are there other fields that should also be range-tested? Should outliers also be dropped?
+            speed >= 0?
+            course in [0,360]?
+            alt in [0,10000]?
+            etc.
+
+        Accelerometer x, y and z data are provided as integers and then multiplied by a scale factor of 0.00390625 to convert it to a floating range of 0.0 - 1.0.
+
+        One sdb file I tested had 176 samples that were computed with fewer than 3 satellites. 107 of those samples reported 0 satellites. Should we be worried about these?
+
+            Example: in an sdb file of 326,969 records, keeping only records that matched the following criteria eliminated 278 records.
+                -90 <= lat <= 90  
+                -180 <= lon <= 180
+                -10000 <= alt <= 10000
+                sat_used >= 3
+
+    Timestamp Hiccups
+    -----------------
+        Records with existing timestamps (dups) in gps or accel are being dropped, with the preserved record arbitrarily being the first one in the table. Is this the most appropriate record to preserve or is there a better selection criteria? 
+        
+        In particular, I'm wondering if this might be introducing discontinuities for activity counts. The problem apparently comes from a glitch in the SD firmware, but it seems like the clock 'hiccups' from time to time and produces two records for a single moment in time. Would we be better off to record the average of all samples reporting the same timestamp instead of choosing just one?
+
+            I've dumped sample cases from an sdb file that does this and can see no reliable pattern between the hiccup records. Some pairs show a change in precision for the lat/lon, but sometimes the higher precision is in the first and sometimes the second. Some pairs show a difference in number of satellites, but sometimes the higher precision is with more satellites and sometimes its with fewer.
+
+            It seems common for there to be a difference in precision, but it is not universal. And 50% of the time, we're keeping the less precise reading and dropping the better one. That's why I'm wondering if we should combine them.
+
+    NULL Values
+    -----------
+        In both tables, timestamp and iid are required to be not null. Most other values do not have that requirement. Would it be better for us to establish default values for all these fields, rather than having all downstream algorithms need to worry about nulls?
+
+            If so, I'll need documentation on value profiles for gps
+            fields so I can establish approp defaults.
+
+        But there are definitely null values in the tables, so
+        importing to this definition will require either:
+            - default values
+            - dropping nulls
+            - remove the non-null constraints
+
+        With my sample file, rejecting records with any null values culls 663 records from the 326,969 samples. Limiting the non-null requirement to just ts, lat, lon, speed, course, alt and sat_used reduces this to 102 records culled.
+
+        And if we're happy letting certain columns contain a null, should we consider dropping that column altogether?
+
+
+
+
+Questions for Zoe/Coordinators:
+	When SD data comes from coordinators in batches, they are bundled within directories by IID.
+		- Can the same IID occur in more than one batch per wave?
+			If so, the archiving process needs to merge the folders and possibly rename sdb files to avoid collisions.
+    ORGANIZED BY IID_SDID
+
+	If multiple SD devices were assigned to a single participant, will those be included in the same IID folder but with different fnames? Or will they appear in different folders in different batches?
+		- Again, the archiving process needs to know how to merge the folders.
+    ORGANIZED BY IID_SDID
+
+	With incoming batch folders, can I trust that SDB files have been matched up properly to the correct user and placed in their folder?
+		- If not, then I'll have to verify the incoming sdb files and their time windows against the known sensedoc assignments managed by the coordinators in the Participant Portal.
+        -
+    ORGANIZED BY IID_SDID
+
+
+Example records demonstrating the time glitch
+---------------------------------------------
+ts,lat,lon,mode,fix,alt,sat_used,sat_in_view
+5965375000000,48.4271116666667,-123.368828333333,A,A,66.9,5,12
+5965375000000,48.4271383333333,-123.368806666667,A,A,79.0,4,12
+
+5965379000000,48.4270366666667,-123.368811666667,A,A,50.9,6,12
+5965379000000,48.4270533333333,-123.36881,A,A,53.3,6,12
+
+5965382000000,48.42705,-123.368793333333,A,A,48.9,5,12
+5965382000000,48.4270616666667,-123.368798333333,A,A,50.3,6,12
+
+5965384000000,48.4270333333333,-123.368751666667,A,A,49.0,6,12
+5965384000000,48.42705,-123.368761666667,A,A,47.8,5,12
+
+5965385000000,48.4270233333333,-123.368761666667,A,A,46.6,6,12
+5965385000000,48.4270233333333,-123.368746666667,A,A,47.1,6,12
+
+5965389000000,48.427005,-123.368693333333,A,A,45.0,7,12
+5965389000000,48.4270083333333,-123.368683333333,A,A,44.7,6,12
+
+5965395000000,48.4269733333333,-123.368661666667,A,A,32.0,7,12
+5965395000000,48.4269866666667,-123.368663333333,A,A,36.2,7,12
+
+5965404000000,48.4268883333333,-123.368578333333,A,A,14.8,7,12
+5965404000000,48.42691,-123.368595,A,A,17.2,7,12
+
+5965409000000,48.4268533333333,-123.368506666667,A,A,8.6,7,12
+5965409000000,48.42686,-123.368518333333,A,A,10.3,8,12
+
+5965415000000,48.4268266666667,-123.368468333333,A,A,6.3,7,12
+5965415000000,48.42683,-123.368446666667,A,A,4.8,7,12
+
+5965428000000,48.4267083333333,-123.368245,A,A,0.6,7,12
+5965428000000,48.426725,-123.36826,A,A,-0.7,7,12
+
+5965432000000,48.4266783333333,-123.368211666667,A,A,-2.7,5,12
+5965432000000,48.4266833333333,-123.368213333333,A,A,-1.8,7,12
+
+5965436000000,48.42662,-123.368178333333,A,A,0.2,6,12
+5965436000000,48.4266283333333,-123.368173333333,A,A,0.7,7,12
+
+5965439000000,48.4266233333333,-123.36815,A,A,-4.9,7,12
+5965439000000,48.4266316666667,-123.36814,A,A,-5.0,8,12
+
+5965447000000,48.4266316666667,-123.368086666667,A,A,10.0,8,12
+5965447000000,48.4266433333333,-123.368076666667,A,A,10.6,9,12
+
+5965452000000,48.4266416666667,-123.368015,A,A,15.4,7,12
+5965452000000,48.426655,-123.368031666667,A,A,15.1,7,12
+
+5965455000000,48.42663,-123.367981666667,A,A,15.8,7,12
+5965455000000,48.42663,-123.367965,A,A,16.7,8,12
+
+5965459000000,48.42662,-123.367926666667,A,A,16.6,7,12
+5965459000000,48.42662,-123.367916666667,A,A,16.5,8,12
+
+5965461000000,48.42662,-123.3679,A,A,16.7,8,12
+5965461000000,48.4266216666667,-123.367886666667,A,A,16.7,8,12
+
+5965463000000,48.4266166666667,-123.367875,A,A,15.8,7,12
+5965463000000,48.4266233333333,-123.367856666667,A,A,15.0,7,12
+
+5965472000000,48.4266,-123.367708333333,A,A,19.1,8,12
+5965472000000,48.426605,-123.367736666667,A,A,18.4,7,12
+
+6388574000000,48.4664983333333,-123.433925,A,A,-0.8,9,12
+6388574000000,48.4665083333333,-123.433906666667,A,A,-1.6,9,12
+
+
+Example records demonstrating the too-few-satellites issue
+----------------------------------------------------------
+    g.ts,lat,lon,g.sat_used
+>   4649475000000,48.4363566666667,-123.409928333333,0
+    4649476000000,48.436355,-123.409928333333,6
+    4649477000000,48.436355,-123.409928333333,6
+    4649478000000,48.4363566666667,-123.40993,6
+    4649479000000,48.4363566666667,-123.40993,6
+    4649480000000,48.4363566666667,-123.40993,6
+    4649481000000,48.43636,-123.409926666667,6
+    4649482000000,48.436365,-123.409915,6
+    4649483000000,48.4363683333333,-123.409913333333,6
+    4649484000000,48.436375,-123.409905,6
+
+    4661520000000,48.43634,-123.409951666667,11
+    4661521000000,48.43634,-123.409951666667,11
+    4661522000000,48.43634,-123.409951666667,11
+    4661523000000,48.43634,-123.409951666667,11
+    4661524000000,48.43634,-123.409951666667,11
+    4661525000000,48.43634,-123.40995,11
+    4661526000000,48.43634,-123.40995,11
+    4661527000000,48.43634,-123.40995,11
+    4661528000000,48.43634,-123.40995,11
+>   4661529000000,48.4363416666667,-123.40995,0
+    4661530000000,48.43634,-123.40995,11
+    4661531000000,48.43634,-123.40995,11
+    4661532000000,48.43634,-123.40995,11
+    4661533000000,48.43634,-123.409951666667,11
+    4661534000000,48.43634,-123.409951666667,11
+    4661535000000,48.43634,-123.409951666667,11
+    4661536000000,48.4363416666667,-123.40995,11
+    4661537000000,48.4363416666667,-123.40995,11
+    4661538000000,48.4363416666667,-123.40995,11
+
+    5459255000000,48.436355,-123.40994,10
+    5459256000000,48.436355,-123.409938333333,11
+    5459257000000,48.436355,-123.409936666667,11
+    5459258000000,48.436355,-123.409935,11
+    5459259000000,48.436355,-123.409935,11
+    5459260000000,48.436355,-123.409933333333,11
+    5459261000000,48.436355,-123.409931666667,11
+    5459262000000,48.436355,-123.409931666667,11
+    5459263000000,48.436355,-123.40993,11
+>   5459264000000,48.436355,-123.40993,0
+    5459265000000,48.436355,-123.409928333333,11
+    5459266000000,48.436355,-123.409925,11
+    5459267000000,48.4363533333333,-123.409925,11
+    5459268000000,48.4363533333333,-123.409925,11
+    5459269000000,48.4363533333333,-123.409923333333,12
+    5459270000000,48.4363533333333,-123.409921666667,11
+    5459271000000,48.4363533333333,-123.409921666667,11
+    5459272000000,48.4363516666667,-123.409921666667,11
+    5459273000000,48.4363516666667,-123.40992,11
+
+    5861955000000,48.4363266666667,-123.409878333333,8
+    5861956000000,48.4363283333333,-123.409886666667,8
+    5861957000000,48.436315,-123.409896666667,9
+    5861958000000,48.4363116666667,-123.4099,7
+    5861959000000,48.436305,-123.409908333333,7
+    5861960000000,48.436305,-123.409911666667,7
+    5861961000000,48.4363083333333,-123.409928333333,7
+    5861962000000,48.4363133333333,-123.409945,7
+    5861963000000,48.4363183333333,-123.409961666667,8
+>   5861964000000,48.4363316666667,-123.409978333333,0
+    5861965000000,48.4363466666667,-123.409995,9
+    5861966000000,48.4363366666667,-123.410008333333,8
+    5861967000000,48.4363433333333,-123.410011666667,7
+    5861968000000,48.4363483333333,-123.41001,8
+    5861969000000,48.4363333333333,-123.410018333333,8
+    5861970000000,48.4363333333333,-123.410028333333,8
+    5861971000000,48.4363266666667,-123.410028333333,8
+    5861972000000,48.436325,-123.410033333333,8
+    5861973000000,48.4363183333333,-123.410046666667,8
+
+    5865748000000,48.43641,-123.40995,7
+    5865749000000,48.43641,-123.409943333333,7
+    5865750000000,48.4364066666667,-123.409946666667,7
+    5865751000000,48.4363983333333,-123.409951666667,8
+    5865752000000,48.4363916666667,-123.409955,8
+    5865753000000,48.436395,-123.409953333333,8
+    5865754000000,48.4363966666667,-123.409953333333,8
+    5865755000000,48.4363983333333,-123.409956666667,9
+    5865756000000,48.436395,-123.40996,9
+>   5865757000000,48.436395,-123.409965,0
+    5865758000000,48.43639,-123.409971666667,9
+    5865759000000,48.4363816666667,-123.409973333333,9
+    5865760000000,48.4363833333333,-123.409975,9
+    5865761000000,48.4363783333333,-123.409971666667,9
+    5865762000000,48.4363733333333,-123.409978333333,7
+    5865763000000,48.43636,-123.41,7
+    5865764000000,48.4363583333333,-123.41001,7
+    5865765000000,48.436355,-123.410005,8
+    5865766000000,48.43636,-123.41001,9
+
+    5871266000000,48.426455,-123.367506666667,6
+    5871267000000,48.42645,-123.367505,5
+    5871268000000,48.4264433333333,-123.367505,6
+    5871269000000,48.4264166666667,-123.367501666667,6
+    5871270000000,48.4264083333333,-123.367493333333,7
+    5871271000000,48.4264083333333,-123.36749,7
+    5871272000000,48.4264133333333,-123.367485,7
+    5871273000000,48.4264116666667,-123.367478333333,7
+    5871274000000,48.426415,-123.367483333333,7
+>   5871275000000,48.4264483333333,-123.367493333333,0
+    5871277000000,48.4264566666667,-123.367496666667,7
+    5871278000000,48.4264716666667,-123.36749,7
+    5871279000000,48.42647,-123.367465,6
+    5871280000000,48.4264783333333,-123.36747,5
+    5871281000000,48.4264633333333,-123.367475,4
+    5871282000000,48.4264683333333,-123.367468333333,3
+    5871283000000,48.426455,-123.367543333333,6
+    5871284000000,48.4264516666667,-123.367583333333,5
+
+    5895767000000,48.4364233333333,-123.409825,8
+    5895768000000,48.43643,-123.409845,8
+    5895769000000,48.4364216666667,-123.409853333333,8
+    5895770000000,48.4364216666667,-123.409871666667,9
+    5895771000000,48.436425,-123.40987,9
+    5895772000000,48.43642,-123.409868333333,9
+    5895773000000,48.4364166666667,-123.409866666667,7
+    5895774000000,48.4364116666667,-123.409871666667,7
+    5895775000000,48.4364,-123.409881666667,7
+>   5895776000000,48.4363933333333,-123.409886666667,0
+    5895777000000,48.436395,-123.409881666667,7
+    5895778000000,48.43639,-123.409875,8
+    5895779000000,48.43639,-123.40988,8
+    5895780000000,48.4364,-123.409891666667,9
+    5895781000000,48.436405,-123.409895,8
+    5895782000000,48.4364083333333,-123.409895,8
+    5895783000000,48.436415,-123.40989,8
+    5895784000000,48.43642,-123.40989,8
+    5895785000000,48.436425,-123.409886666667,8
+
+    5905422000000,48.436415,-123.410081666667,8
+    5905423000000,48.4364233333333,-123.41005,8
+    5905424000000,48.4364283333333,-123.410023333333,7
+    5905425000000,48.4364316666667,-123.409998333333,7
+    5905426000000,48.4364366666667,-123.409973333333,6
+    5905427000000,48.4364383333333,-123.409953333333,7
+    5905428000000,48.436435,-123.40995,6
+    5905429000000,48.4364366666667,-123.409923333333,6
+    5905430000000,48.4364383333333,-123.4099,
+>   5905431000000,48.43644,-123.409875,0
+    5905432000000,48.43644,-123.409851666667,6
+    5905433000000,48.436435,-123.409866666667,6
+    5905434000000,48.43643,-123.409881666667,6
+    5905435000000,48.4364266666667,-123.409893333333,6
+    5905436000000,48.436425,-123.409898333333,6
+    5905437000000,48.43642,-123.409903333333,6
+    5905438000000,48.4364183333333,-123.409906666667,6
+    5905439000000,48.4364166666667,-123.409913333333,6
+    5905440000000,48.4364083333333,-123.409911666667,6
+
+    5908874000000,48.4364016666667,-123.410026666667,6
+    5908875000000,48.436415,-123.410031666667,6
+    5908876000000,48.4364116666667,-123.410035,6
+    5908877000000,48.4364133333333,-123.41004,6
+    5908878000000,48.43642,-123.410041666667,6
+    5908879000000,48.4364283333333,-123.410043333333,6
+    5908880000000,48.4364283333333,-123.410048333333,6
+    5908881000000,48.4364316666667,-123.410056666667,6
+    5908882000000,48.43643,-123.410066666667,6
+>   5908883000000,48.4364366666667,-123.410065,0
+    5908884000000,48.4364333333333,-123.410065,6
+    5908885000000,48.4364316666667,-123.410061666667,6
+    5908886000000,48.4364316666667,-123.410041666667,6
+    5908887000000,48.4364333333333,-123.410053333333,6
+    5908888000000,48.4364216666667,-123.410078333333,6
+    5908889000000,48.436405,-123.410095,6
+    5908890000000,48.4364016666667,-123.410101666667,6
+    5908891000000,48.4364066666667,-123.410106666667,6
+    5908892000000,48.4364083333333,-123.410115,6
+
+    5909470000000,48.4362566666667,-123.409951666667,5
+    5909471000000,48.4362583333333,-123.40996,5
+    5909472000000,48.436255,-123.409976666667,5
+    5909473000000,48.4362533333333,-123.40998,5
+    5909474000000,48.4361966666667,-123.410055,4
+    5909475000000,48.436135,-123.410141666667,4
+>   5909479000000,48.4361083333333,-123.410151666667,2
+>   5909480000000,48.4361033333333,-123.41015,2
+>   5909481000000,48.4360966666667,-123.410153333333,2
+    5909482000000,48.43606,-123.41022,4
+    5909483000000,48.436025,-123.410265,4
+    5909484000000,48.4359766666667,-123.410328333333,4
+    5909488000000,48.4359083333333,-123.4104,4
+
+    5909493000000,48.4358333333333,-123.410463333333,4
+>   5909494000000,48.4358233333333,-123.41047,2
+>   5909495000000,48.435815,-123.410475,2
+>   5909496000000,48.43581,-123.410478333333,2
+>   5909497000000,48.4358066666667,-123.41048,2
+    5909498000000,48.4358683333333,-123.41042,4
+    5909499000000,48.4359233333333,-123.410365,4
+    5909500000000,48.4359716666667,-123.410321666667,4
+    5909501000000,48.436,-123.410301666667,4
+    5909502000000,48.4360216666667,-123.410288333333,5
+    5909503000000,48.4360433333333,-123.41028,5
+
+    # That's enough to get a sense of what's going on.
+    # I've deleted the rest of the examples to keep
+    # the file managable.

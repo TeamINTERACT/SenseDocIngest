@@ -8,8 +8,14 @@ a PostgreSQL database.
 The status of each participant directory is logged to:
     ./ingest-YYYYMMDD-HHMMSS.log
 
+NOTE:
+This code has been instrumented to run multithreaded over the I/O
+sections, but to make use of that, we need to run the job wrapped in
+a bash shell that sets up the SLURM settings. Otherwise no additional
+threads or processors will be available in the runtime environment.
+
 Usage:
-  sensedoc_ingest [options] DIRPATH
+  sensedoc_ingest [options] PATH
   sensedoc_ingest -h | --help | -V | --version
 
 Options:
@@ -24,34 +30,46 @@ import subprocess as sub
 from docopt import docopt
 from itertools import combinations
 from pprint import pprint
-# from concurrent.futures import ThreadPoolExecutor as PoolExecutor
+from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 
 # number of GPS samples a participant must have across all their
 # data files to be included in the database
-min_sample_threshold = 10000
+min_sample_threshold = 3600 # equates to 1 hour of usable data
 dbname = 'interact_db'
 logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
-def log(str):
+def log(msg):
     if loghandle:
-        loghandle.write(str + '\n')
-    if args['--verbose']:
-        print(str)
+        loghandle.write("%s\n" % msg)
+    print("LOG: %s" % msg)
 
 def mention(str):
     if args['--verbose']:
         print(str)
+        if loghandle:
+            loghandle.write("%s\n"%str)
 
 def err(str):
     log("ERR: %s"%str)
     exit(1)
 
 def test_overlapping_daterange(dt1_st, dt1_end, dt2_st, dt2_end):
-    return not (dt1_end < dt2_st or dt1_st > dt2_end)
-    # return not (dt1_st < dt2_end and dt1_end >dt2_st)
+    """
+    Given the start and end of two different date ranges, determine
+    whether the ranges overlap.
+    """
+    # Make sure each start and end pair are in sorted order
+    start1 = min(dt1_st, dt1_end)
+    end1 = max(dt1_st, dt1_end)
+    start2 = min(dt2_st, dt2_end)
+    end2 = max(dt2_st, dt2_end)
 
-def select_usable_files(fileset, iidstr):
+    # If one range occurs entirely before the other, there is no overlap.
+    # Otherwise there is.
+    return not (end1 < start2 or start1 > end2)
+
+def select_usable_files(filelist, iidstr):
     """
     Given a list of SDB filenames for a single participant,
     perform basic acceptability tests on their contents.
@@ -77,7 +95,7 @@ def select_usable_files(fileset, iidstr):
             """
     fstats = []
     good_files = []
-    for fpath in fileset:
+    for fpath in filelist:
         # open the file and compute its date range and record count
         conn = sqlite3.connect(fpath)
         c = conn.cursor()
@@ -95,7 +113,7 @@ def select_usable_files(fileset, iidstr):
                                                            count))
     if len(fstats) > 1:
         # compare all possible pairings of files and reject 
-        # this participant if any pairs have overlap between 
+        # this filelist if any pair has overlap between 
         # their min and max date stamps.
         for stat1,stat2 in combinations(fstats,2):
             if test_overlapping_daterange(stat1[0], stat1[1], 
@@ -105,7 +123,7 @@ def select_usable_files(fileset, iidstr):
                 log("Overlapping timestamps found between:\n  %s\n  %s" % (stat1[3],stat2[3]))
                 return None
         # total the number of samples from all files and
-        # reject the participant if the number of samples does not
+        # reject the filelist if the number of samples does not
         # meet the minimum threshold
         if sum([x[2] for x in fstats]) < min_sample_threshold:
             log("Not enough samples for participant %s"%iidstr)
@@ -120,7 +138,12 @@ def select_usable_files(fileset, iidstr):
     log("Insufficient usable data for participant %s." % iidstr)
     return None
 
-def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
+def execute_copy_via_shell(argset):
+    # The easiest way to invoke this func from the thread pool manager
+    # is to pack up the arguments for each call into a list. So first
+    # we have to unpack the function arguments.
+    [filepath, tablename, selectionsql, pid] = argset
+
     # Now we have everything we need to ingest the given datafile. 
     # On the command line we could run a single command to
     # pull data from the sqlite file with sqlite3 and ingest into the 
@@ -168,7 +191,9 @@ def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
     # print("Tablename: %s"%tablename)
     # print("PID: %s"%pid)
     # tableid = '_%s_%s' % (tablename, pid)
-    tableid = ''
+    tableid = '_%s_%s' % (filepath[-20:],tablename)
+    tableid = tableid.translate({ord(i):None for i in '-./'})
+    # tableid = ''
     copycmd = """
              CREATE TABLE level_0.deleteme{tid} (LIKE level_0.{tn}); 
              COPY level_0.deleteme{tid} FROM STDIN delimiter '|' CSV;
@@ -191,12 +216,13 @@ def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
         return False
     return True
 
-def ingest_sdb_file(filepath, iidstr):
+def ingest_sdb_file(argset):
     """
     Given an SDB datafile, load its tables into the database,
     tagged with the iid of the participant who produced it.
     Return True if file ingested properly, False otherwise
     """
+    [filepath,iidstr] = argset
     refDate = ''
     with sqlite3.connect(filepath) as conn:
         # get the reference date from the SDB from which all 
@@ -213,11 +239,11 @@ def ingest_sdb_file(filepath, iidstr):
     # a number of data scrubbing and polishing steps. These same steps
     # need to be implemented in this newer (and hopefully faster) ingest
     # system.
-    # - Reject filesets with overlapping time windows (and notify admin)
+    # X Reject filesets with overlapping time windows (and notify admin)
     # X Add the participant's iid to every sample record
     # X Merge the timestamps into one value with millisec precision
     # X Scale the x,y,z values of the accel table
-    # - Set empty string as default value for all text and char fields
+    # X Set empty string as default value for all text and char fields
     # - All fields must be NOT NULL and have sensible defaults
     # - gps.lat must be between -90 and 90 inclusive
     # - gps.lon must be between -180 and 180 inclusive
@@ -235,23 +261,32 @@ def ingest_sdb_file(filepath, iidstr):
     # Each table in the SQLite file needs its own SELECT stmt
     # to ensure data is read from the file in a known format.
     selectionsql = {}
-    # selectionsql['accel'] = """
-    #                    SELECT '{}' AS iid, 
-    #                         strftime('%Y-%m-%d %H:%M:%f', '{}', 
-    #                                 (ts/1000000.0)||' seconds') as ts,
-    #                         x * 0.00390625 as x, ---scale factor 
-    #                         y * 0.00390625 as y, ---scale factor
-    #                         z * 0.00390625 as z  ---scale factor
-    #                    FROM accel;
-    #                    """.format(iidstr, refDate)
-    selectionsql['gps'] = """
+    selectionsql['sd_accel'] = """
+                       SELECT '{}' AS iid, 
+                            strftime('%Y-%m-%d %H:%M:%f', '{}', 
+                                    (ts/1000000.0)||' seconds') as ts,
+                            x * 0.00390625 as x, ---convert to 0.0-1.0
+                            y * 0.00390625 as y, ---convert to 0.0-1.0
+                            z * 0.00390625 as z  ---convert to 0.0-1.0
+                       FROM accel
+                       WHERE x is not null
+                         AND y is not null
+                         AND z is not null;
+                       """.format(iidstr, refDate)
+    selectionsql['sd_gps'] = """
                        SELECT '{}' AS iid, 
                             strftime('%Y-%m-%d %H:%M:%f', '{}', 
                                     (ts/1000000.0)||' seconds') as ts,
                             lat, lon, speed, course, mode, fix, alt, 
                             mode1, mode2, sat_used, 
                             pdop, hdop, vdop, sat_in_view 
-                            FROM gps;
+                            FROM gps
+                            WHERE lat is not null
+                              AND lon is not null
+                              AND lat BETWEEN -90.0 and 90.0
+                              AND lon BETWEEN -180.0 and 180.0
+                              AND alt BETWEEN -10000 and 100000
+                              AND sat_used >= 3;
                         """.format(iidstr, refDate)
         # NOTE: In the above queries, strftime() is used instead of 
         # datetime() because datetime() truncates to seconds, whereas
@@ -263,7 +298,7 @@ def ingest_sdb_file(filepath, iidstr):
     # DB, but to do it quickly, we're going to dispatch multiple 
     # threads. In preparation for that step, we're going to
     # pre-construct the set of parameters that will be passed to the
-    # actual ingestor function - one set for each invocation.
+    # actual ingestor function - one set of args for each invocation.
     success = True
     argsets = []
     for i,tbl in enumerate(selectionsql):
@@ -271,25 +306,28 @@ def ingest_sdb_file(filepath, iidstr):
 
     # Now ingest each of the required tables into the DB.
 
-    # # Create multiple threads and dispatch them to run 
-    # # execute_copy_via_shell() with each argset
-    # # with PoolExecutor(max_workers=4) as executor:
-        # # executor.map(execute_copy_via_shell, argsets)
+    # Create multiple threads and dispatch them to run 
+    # func execute_copy_via_shell() against each argset.
+    # Then take all the boolean results and see if they all succeeded.
+    # with PoolExecutor(max_workers=4) as executor:
+    #     resultlist = executor.map(execute_copy_via_shell, argsets)
+    #     success = all(resultlist)
     for argset in argsets:
-        success = success and execute_copy_via_shell(*argset)
+        success = success and execute_copy_via_shell(argset)
     return success
 
 
-def ingest_user_directory(rootdir, iidstr):
+def ingest_user_directory(argset): #rootdir, iidstr):
     """
     Given an interact_id number in string form and a path to a data dir,
     perform basic acceptance tests on the data files in that dir and
     if they pass, load them into the database, tagged with the iid.
     """
+    [rootdir,iidstr] = argset
     # if not iidstr.endswith('90'):
     #     return
     dirpath = os.path.join(rootdir, iidstr)
-    mention("Attempting ingest on directory: %s" % dirpath)
+    log("Attempting ingest on directory: %s" % dirpath)
 
     # get a list of datafiles in this directory
     candidate_files = []
@@ -314,36 +352,58 @@ def ingest_user_directory(rootdir, iidstr):
 
     # now actually ingest the datafiles
     success = True
+    argsets = []
     for sdbfile in ingest_files:
-        success = success and ingest_sdb_file(filepath, iidstr)
+        # success = success and ingest_sdb_file(filepath, iidstr)
+        argsets.append( [filepath, iidstr] )
+
+    with PoolExecutor(max_workers=4) as executor:
+        resultlist = executor.map(ingest_sdb_file, argsets)
+        success = all(resultlist)
     
     return success
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
-    log(args)
 
-    # process ingest restrictions
-    target_iids = []
-    if args['-i']:
-        target_iids.append(args['-i'])
-        print("WARNING: Ingesting only IIDs " + ','.join(target_iids))
-
-    rootdir = '.'
-    if args['DIRPATH']:
-        if not os.path.isdir(args['DIRPATH']):
-            err("Path %s is not a valid directory."%args['DIRPATH'])
-        rootdir = args['DIRPATH']
-    log("Root directory: %s" % rootdir)
-
-    # The files we're looking for are organized in directories by
-    # interact_id. The directory name is the participant's iid,
-    # and the file within that directory is {iid}.sdb
     with open(logfile, 'w') as loghandle:
-        for dirpath in os.listdir(rootdir):
-            if not target_iids or dirpath in target_iids:
-                if ingest_user_directory(rootdir, dirpath):
-                    log("Participant %s ingested successfully."%dirpath)
+        log(args)
+
+        # process ingest restrictions
+        target_iids = []
+        if args['-i']:
+            target_iids.append(args['-i'])
+            print("WARNING: Ingesting only IIDs " + ','.join(target_iids))
+
+        if args['PATH']:
+            # Ingesting a single file is quick and easy.
+            # (This is used primarily for testing.)
+            if os.path.isfile(args['PATH']):
+                fpath = args['PATH']
+                if fpath.lower().endswith('.sdb'):
+                    ingest_sdb_file( [fpath, "007"] )
                 else:
-                    log("Problem ingesting participant %s"%dirpath)
+                    err("Only .sdb files can be ingested.")
+                exit()
+
+        # Otherwise, we're ingesting directories recursively.
+        rootdir = args['PATH']
+        log("Root directory: %s" % rootdir)
+
+        # The files we're looking for are organized in directories by
+        # interact_id. The directory name is the participant's iid,
+        # and the file within that directory is {iid}.sdb
+        argsets = []
+        for pid,dirpath in enumerate(os.listdir(rootdir)):
+            if not target_iids or dirpath in target_iids:
+                argsets.append( [rootdir,dirpath] )
+                # argset = [rootdir,dirpath]
+                # if ingest_user_directory( argset ):
+                #     log("Participant %s ingested successfully."%dirpath)
+                # else:
+                #     log("Problem ingesting participant %s"%dirpath)
+
+        with PoolExecutor(max_workers=4) as executor:
+            resultlist = executor.map(ingest_user_directory, argsets)
+            clean = all(resultlist)
 
