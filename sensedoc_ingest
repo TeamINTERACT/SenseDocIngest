@@ -20,6 +20,7 @@ Usage:
 
 Options:
     -h            Display this help info
+    -L FNAME      Save log to FNAME
     -i IID        Ingest participant IID only
     -v,--verbose  Provide more verbose output
 """
@@ -432,6 +433,11 @@ def ingest_user_files(argset):
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
+
+    # if user has specified a log filename, use that instead 
+    # of the default
+    if args['-L']:
+        logfile = args['-L']
 
     with open(logfile, 'w') as loghandle:
         log("Ingest script was run with following arguments:")
