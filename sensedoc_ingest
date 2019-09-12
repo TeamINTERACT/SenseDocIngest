@@ -217,16 +217,10 @@ def execute_copy_via_shell(argset):
     # that need to be applied to the data before it can be used.
     #
     # Unfortunately, the data is known to contain occasional duplicate 
-    # records, due to a minor glitch in the capture hardware. So the 
-    # choice is to remove those duplicates at SELECT time, when reading
-    # them out of the sqlite file, or at INSERT time, when reading them
-    # into the database. 
-    #
-    # Eliminating them sooner would be preferable.
-    #    Running a test on a single file with 22 duplicates,
-    #    eliminating the duplicates at selection time added 1.1s to the
-    #    processing time for that file (1.7s vs 2.8s)
-    #    Running a test on duplicate removal at ingest time gave us
+    # records, which happen when the SD device syncs its onboard clock 
+    # with the real world. In these cases, the most accurate data for 
+    # that timestamp are the values associated with the last record
+    # recorded, not the first.
     #
     # So, to eliminate duplicates, we'll create a dummy table and load
     # the data into that, and then use INSERT ON CONFLICT DO NOTHING to
@@ -243,7 +237,7 @@ def execute_copy_via_shell(argset):
              COPY level_0.deleteme{tid} FROM STDIN delimiter '|' CSV;
              INSERT INTO level_0.{tn}
                 SELECT * FROM level_0.deleteme{tid}
-                ON CONFLICT (iid,ts) DO NOTHING;
+             ON CONFLICT (iid,ts) DO NOTHING;
              DROP TABLE level_0.deleteme{tid};
              """.format(tn=tablename,tid=tableid)
 
@@ -289,10 +283,10 @@ def ingest_sdb_file(argset):
     # X Merge the timestamps into one value with millisec precision
     # X Scale the x,y,z values of the accel table
     # X Set empty string as default value for all text and char fields
-    # - All fields must be NOT NULL and have sensible defaults
-    # - gps.lat must be between -90 and 90 inclusive
-    # - gps.lon must be between -180 and 180 inclusive
-    # - gps.sat_in_view to integer and default to -1
+    # X All fields must be NOT NULL and have sensible defaults
+    # X gps.lat must be between -90 and 90 inclusive
+    # X gps.lon must be between -180 and 180 inclusive
+    # X gps.sat_in_view to integer and default to -1
     # - Reject records that duplicate existing value of iid,ts
     #      Unfortunately, the records with duplicate timestamps are 
     #      not duplicated in all fields, so we can't just do
@@ -316,7 +310,8 @@ def ingest_sdb_file(argset):
                        FROM accel
                        WHERE x is not null
                          AND y is not null
-                         AND z is not null;
+                         AND z is not null
+                       ORDER BY ts, ROWID DESC;
                        """.format(iidstr, refDate)
     selectionsql['sd_gps'] = """
                        SELECT '{}' AS iid, 
@@ -337,13 +332,38 @@ def ingest_sdb_file(argset):
                               AND course BETWEEN -360 and 360
                               AND speed BETWEEN 0 and 1000
                               AND sat_used BETWEEN 0 and 50 
-                              AND sat_in_view BETWEEN 0 and 50;
+                              AND sat_in_view BETWEEN 0 and 50
+                            ORDER BY ts, ROWID DESC;
                         """.format(iidstr, refDate)
         # NOTE: In the above queries, strftime() is used instead of 
         # datetime() because datetime() truncates to seconds, whereas
         # the strftime() with %f keeps fractional seconds. 
         # Also note that the .0 is important at the end of 1000000.0, 
         # to preserve the floating-point nature of the result.
+        # The rows are sorted by ts, and then  ROWID DESC because 
+        # we need to filter later by the order in which the rows were 
+        # written to the file, keeping only the latest instance in cases
+        # where records share the same timestamp info.
+
+    # Also need a field assignement stmt for the ON CONFLICT clause
+    # updatesql = {}
+    # updatesql['sd_gps'] = """
+    #                 SET lat = EXCLUDED.lat,
+    #                     lon = EXCLUDED.lon,
+    #                     speed = EXCLUDED.speed,
+    #                     course = EXCLUDED.course,
+    #                     alt = EXCLUDED.alt,
+    #                     sat_used = EXCLUDED.sat_used,
+    #                     pdop = EXCLUDED.pdop,
+    #                     hdop = EXCLUDED.hdop,
+    #                     vdop = EXCLUDED.vdop,
+    #                     sat_in_view = EXCLUDED.sat_in_view
+    #                     """
+    # updatesql['sd_accel'] = """
+    #                 SET x = EXCLUDED.x,
+    #                     y = EXCLUDED.y,
+    #                     z = EXCLUDED.z
+    #                     """
 
     # In a moment, we're going to ingest the individual files into the 
     # DB, but to do it quickly, we're going to dispatch multiple 
@@ -353,7 +373,10 @@ def ingest_sdb_file(argset):
     success = True
     argsets = []
     for i,tbl in enumerate(selectionsql):
-        argsets.append([filepath, tbl, selectionsql[tbl], i])
+        argsets.append([filepath, tbl, 
+                        selectionsql[tbl], 
+                        # updatesql[tbl], 
+                        i])
 
     # Now ingest each of the required tables into the DB.
 
