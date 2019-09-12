@@ -36,22 +36,28 @@ from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 # data files to be included in the database
 min_sample_threshold = 3600 # equates to 1 hour of usable data
 dbname = 'interact_db'
-logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
+logfile = datetime.datetime.now().strftime(".ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
 # number of processing threads to run
 num_threads = 1
 
-def log(msg):
+def log(msg, prebreak=False):
     if loghandle:
+        if prebreak:
+            loghandle.write("\n")
         loghandle.write("%s\n" % msg)
+        loghandle.flush()
+    if prebreak:
+        print('')
     print("LOG: %s" % msg)
 
 def mention(str):
     if args['--verbose']:
         print(str)
-        if loghandle:
-            loghandle.write("%s\n"%str)
+        # verbose statements written to the log as well as the screen
+        # if loghandle:
+            # loghandle.write("%s\n"%str)
 
 def err(str):
     log("ERR: %s"%str)
@@ -87,15 +93,16 @@ def select_usable_files(filelist, iidstr):
     """
 
     mention("Examining files for participant: %s" % iidstr)
+    # pprint(filelist)
     # Accel tables are MUCH denser and take a lot longer to scan.
     # So to speed up the process, I'm assuming that if the gps table 
     # contains good dates and data, the accel table will as well. 
-    sql = """
-            SELECT MIN(utcdate) as mindate,
-                   MAX(utcdate) as maxdate,
-                   COUNT(*) as count
-            FROM gps
-            """
+    # sql = """
+    #         SELECT MIN(utcdate) as mindate,
+    #                MAX(utcdate) as maxdate,
+    #                COUNT(*) as count
+    #         FROM gps
+    #         """
             # It turns out that the following 3 queries are MUCH
             # faster than the one above, executing in about 1/8th 
             # the time. And since there's a non-trivial amount of 
@@ -105,57 +112,74 @@ def select_usable_files(filelist, iidstr):
     sql_n   = "SELECT count(1) as n from gps"
 
     fstats = []
-    good_files = []
     for fpath in filelist:
         # open the file and compute its date range and record count
         try:
+            # log("Connecting to source file %s"% fpath)
             with sqlite3.connect(fpath) as conn:
                 c = conn.cursor()
+
+                mindate = 0
                 c.execute(sql_min)
-                mindate = c.fetchone()[0]
+                row = c.fetchone()
+                if row:
+                    mindate = row[0]
+
+                maxdate = 0
                 c.execute(sql_max)
-                maxdate = c.fetchone()[0]
+                row = c.fetchone()
+                if row:
+                    maxdate = row[0]
+
+                count = 0
                 c.execute(sql_n)
-                count = c.fetchone()[0]
+                row = c.fetchone()
+                if row:
+                    count = row[0]
+
         except Exception as e:
             log("Caught a SQL error while counting records.")
             log(e)
 
         # make a note of those stats if they're usable
         if mindate and maxdate and count:
+            log("Keeping file %s"% fpath)
             fstats.append([mindate,maxdate,count,fpath])
-            good_files.append(fpath)
+            # good_files.append(fpath)
         else: # otherwise leave this file out of the list
             log("File %s unacceptable (%s, %s, %s)" % (fpath,
                                                         mindate,
                                                         maxdate,
                                                         count))
-
     if len(fstats) > 1:
         # compare all possible pairings of files and reject 
         # this filelist if any pair has overlap between 
         # their min and max date stamps.
+        log("Testing overlaps for %s"% iidstr)
         for stat1,stat2 in combinations(fstats,2):
             if test_overlapping_daterange(stat1[0], stat1[1], 
                                           stat2[0], stat2[1]):
                 spanstr = "   %s - %s\n   %s - %s"%(stat1[0], stat1[1], 
                                                 stat2[0], stat2[1])
-                log("Overlapping timestamps found between:\n  %s\n  %s" % (stat1[3],stat2[3]))
+                log("Overlapping timestamps found between files:\n  %s\n  %s" % (stat1[3],stat2[3]))
                 return None
+            else:
+                log("Overlap clean.")
         # total the number of samples from all files and
         # reject the filelist if the number of samples does not
         # meet the minimum threshold
-        if sum([x[2] for x in fstats]) < min_sample_threshold:
-            log("Not enough samples for participant %s"%iidstr)
+        contribution = sum([x[2] for x in fstats])
+        if contribution < min_sample_threshold:
+            log("Not enough samples from participant %s (%d)"%(iidstr,contribution))
             return None
-        return good_files
+        return fstats
     elif len(fstats) == 1:
         # if there's only one file, there can't be any overlap
         # so just look at record count
         if fstats[0][2] >= min_sample_threshold:
-            return good_files
+            return fstats
 
-    log("Insufficient usable data for participant %s." % iidstr)
+    log("No usable data files from participant %s." % iidstr)
     return None
 
 def execute_copy_via_shell(argset):
@@ -244,6 +268,7 @@ def ingest_sdb_file(argset):
     """
     [filepath,iidstr] = argset
     refDate = ''
+    log("Ingesting file: %s"%filepath)
     with sqlite3.connect(filepath) as conn:
         # get the reference date from the SDB from which all 
         # timestamps are measured
@@ -297,16 +322,22 @@ def ingest_sdb_file(argset):
                        SELECT '{}' AS iid, 
                             strftime('%Y-%m-%d %H:%M:%f', '{}', 
                                     (ts/1000000.0)||' seconds') as ts,
-                            lat, lon, speed, course, mode, fix, alt, 
-                            mode1, mode2, sat_used, 
+                            lat, lon, speed, course, 
+                            -- mode, fix, 
+                            alt, 
+                            -- mode1, mode2, 
+                            sat_used, 
                             pdop, hdop, vdop, sat_in_view 
                             FROM gps
                             WHERE lat is not null
                               AND lon is not null
-                              AND lat BETWEEN -90.0 and 90.0
-                              AND lon BETWEEN -180.0 and 180.0
+                              AND lat BETWEEN -90 and 90
+                              AND lon BETWEEN -180 and 180
                               AND alt BETWEEN -10000 and 100000
-                              AND sat_used >= 3;
+                              AND course BETWEEN -360 and 360
+                              AND speed BETWEEN 0 and 1000
+                              AND sat_used BETWEEN 0 and 50 
+                              AND sat_in_view BETWEEN 0 and 50;
                         """.format(iidstr, refDate)
         # NOTE: In the above queries, strftime() is used instead of 
         # datetime() because datetime() truncates to seconds, whereas
@@ -334,49 +365,42 @@ def ingest_sdb_file(argset):
     #     success = all(resultlist)
     for argset in argsets:
         success = success and execute_copy_via_shell(argset)
+# I NEED TO COMPARE NUMBER OF RECORDS INGESTED AGAINST NUMBER
+# ORIGINALLY COUNTED IN THE FILE
     return success
 
 
-def ingest_user_directory(argset): #rootdir, iidstr):
+def ingest_user_files(argset):
     """
-    Given an interact_id number in string form and a path to a data dir,
-    perform basic acceptance tests on the data files in that dir and
+    Given an interact_id string and a list of filepaths, 
+    perform basic acceptance tests on the data files and
     if they pass, load them into the database, tagged with the iid.
+    Argset is expected to contain: 
+              iidstr: the interact_id of the participant
+        filepathlist: the list of files to be ingested
     """
-    [rootdir,iidstr] = argset
-    # if not iidstr.endswith('90'):
-    #     return
-    dirpath = os.path.join(rootdir, iidstr)
-    log("Attempting ingest on directory: %s" % dirpath)
-
-    # get a list of datafiles in this directory
-    candidate_files = []
-    for fname in os.listdir(dirpath):
-        filepath = os.path.join(dirpath, fname)
-        if fname.endswith('.sdb') and iidstr in filepath:
-            # then this is a sensedoc datafile
-            candidate_files.append(filepath)
-            mention("Adding target file: %s" % filepath)
-        else:
-            mention("Skipping target file: %s" % filepath)
+    [iidstr, filepathlist] = argset
+    log("Ingesting files for user: %s" % iidstr, prebreak=True)
 
     # Perform basic acceptability tests on the candidate files
     # and reject any files that do not meet standards
-    ingest_files = select_usable_files(candidate_files, iidstr)
+    ingest_file_stats = select_usable_files(filepathlist, iidstr)
 
-    if not ingest_files:
-        log("No usable files found for participant %s"%iidstr)
+    if not ingest_file_stats:
+        log("Files found for participant %s were not usable."%iidstr)
         return False
 
-    mention("Directory contains ingestible files.")
+    log("User %s has ingestible files."%iidstr)
 
     # now actually ingest the datafiles
     success = True
     argsets = []
-    for sdbfile in ingest_files:
-        # success = success and ingest_sdb_file(filepath, iidstr)
-        argsets.append( [filepath, iidstr] )
+    for [min_dt, max_dt, count, sdbfile] in ingest_file_stats:
+        argsets.append( [sdbfile, iidstr] )
 
+# I NEED TO TEST THE NUMBER OF RECORDS INGESTED VS THE NUMBER 
+# ORIGINALLY COUNTED IN THE FILES AND REPORT THE NUMBER OF CULLED
+# RECORDS IN THE LOG
     with PoolExecutor(max_workers=num_threads) as executor:
         resultlist = executor.map(ingest_sdb_file, argsets)
         success = all(resultlist)
@@ -387,6 +411,7 @@ if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
 
     with open(logfile, 'w') as loghandle:
+        log("Ingest script was run with following arguments:")
         log(args)
 
         # process ingest restrictions
@@ -406,24 +431,49 @@ if __name__ == '__main__':
                     err("Only .sdb files can be ingested.")
                 exit()
 
-        # Otherwise, we're ingesting directories recursively.
+        # Otherwise, we ingest directories recursively.
         rootdir = args['PATH']
         log("Root directory: %s" % rootdir)
 
         # The files we're looking for are organized in directories by
-        # interact_id. The directory name is the participant's iid,
-        # and the file within that directory is {iid}.sdb
+        # the unique pairing of interact_id and sdid. 
+        # The directory name is the participant's iid, followed by the 
+        # id of the SD device, so the sdb files for a 
+        # particular participant can appear in multiple folders. 
         argsets = []
         for pid,dirpath in enumerate(os.listdir(rootdir)):
             if not target_iids or dirpath in target_iids:
                 argsets.append( [rootdir,dirpath] )
-                # argset = [rootdir,dirpath]
-                # if ingest_user_directory( argset ):
-                #     log("Participant %s ingested successfully."%dirpath)
-                # else:
-                #     log("Problem ingesting participant %s"%dirpath)
+
+        # So there's no point in trying to ingest a directory. What makes
+        # more sense is to ingest all the specific sdb files associated
+        # with a particular user.
+        participant_files = {}
+        for foldername in os.listdir(rootdir):
+            folderpath = os.path.join(rootdir, foldername)
+            if os.path.isdir(folderpath): # we have a data folder
+                sdidstr = ''
+                iidstr = foldername
+                # sdb data for some participants split over mult folders
+                if '_' in foldername:
+                    iidstr,dummy,sdidstr = foldername.partition('_')
+                # all sdb data within folder belongs to given participant
+                for filename in os.listdir(folderpath):
+                    filepath = os.path.join(folderpath, filename)
+                    if filename.lower().endswith('.sdb'):
+                        if not iidstr in participant_files:
+                            participant_files[iidstr] = []
+                        participant_files[iidstr].append(filepath)
+
+        # we now have a dictionary that maps each participant id to
+        # a list of sdb filepaths, which may or may not occur in 
+        # different folders of the archive tree
+        argsets = []
+        for iidstr in participant_files:
+            if participant_files[iidstr]:
+                argsets.append( [iidstr, participant_files[iidstr]] )
 
         with PoolExecutor(max_workers=num_threads) as executor:
-            resultlist = executor.map(ingest_user_directory, argsets)
+            resultlist = executor.map(ingest_user_files, argsets)
             # clean = all(resultlist)
 
