@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+This script walks a directory tree and fixes directory topology for old
+Interact projects, making them conform to the new naming conventions.
+
+In the old system, there was a single directory for each participant and in the case where only one SenseDoc device was assigned, the data was kept in that folder. But if multiple SDs were assigned, their data was placed in subfolders with names like part1, part2, or device1, device2, etc.
+
+In the new system, each unique combination of iid and sdid are given their own folder, in the form {IID}_{SDID}.
+
+The purpose of this script is to reorganize old-style folder trees into the new style. This is done by simply renaming the directories. Single-device directories are renamed from {IID} to {IID}_{SDID}, while multi-device directories themselves are unchanged, but their subfolders are promoted to {IID}_{SDID} folders at the top level. 
+
+NOTE: Some of the old-style multi-device directories have participant-specific files at the top level, as siblings to the device subfolders. As a result of this reorg, those participant files will still be in the {IID} directory, while the SD device files will be in {IID}_{SDID1}, {IID}_{SDID2}...
+
+NOTE: Complicating this entire process, it turns out that the IIDs used for these folders were taken from a list of "temporary" ids, rather than the definitive ones. To that end, a preliminary process will be undertaken first, in which the directories are all renamed from {FakeIID} to {RealIID}, before the hierarchy rebuild is executed.
+
+The algorithm works by creating a list of all source directory and subdirectory paths and then mapping each to a new destination directory path.
+
+Only after all of these directories have been mapped is the reorg actually carried out, starting with the subdirectories that need to be promoted, and only then proceeding to move the top-level directories. 
+
+NOTE: Because these files are the fundamental data layer, we have to be extremely careful with such manipulations. To that end, be sure to create a duplicate file hierarchy and run this script on the duplicate, rather than working directly on the original. Once the new hierarchy has been organized and verified, the old version can be purged.
+
+
+Verification
+------------
+In principle, verification can be done by creating a master list of all files in the tree and then generating a checksum fingerprint for each. If the fingerprint list for both the source and destination hierarchies are the same, then the refactoring was a success, regardless of paths and file names.  
+
+Usage:
+  refactor [options] SRCPATH DESTPATH
+  refactor -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -L FNAME      Save log to FNAME
+    -i IID        Refactor participant IID only
+    --make-it-so  Actually execute the file manipulations
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+import re
+import csv
+import datetime
+from docopt import docopt
+
+loghandle = None
+logfile = datetime.datetime.now().strftime(".refactor_%Y%m%d-%H%M%S.log")
+
+def log(msg, prebreak=False):
+    if loghandle:
+        if prebreak:
+            loghandle.write("\n")
+        loghandle.write("%s\n" % msg)
+        loghandle.flush()
+    if prebreak:
+        print('')
+    print("LOG: %s" % msg)
+
+def mention(str):
+    if args['--verbose']:
+        print(str)
+        # verbose statements written to the log as well as the screen
+        # if loghandle:
+            # loghandle.write("%s\n"%str)
+
+def err(str):
+    log("ERR: %s"%str)
+    exit(1)
+
+def is_iid(instr):
+    return all([x in '0123456789' for x in instr])
+
+def part_dir_test(dirname, iid):
+    # part dirs start with the iid and end with things like
+    # -part1 -part2 or device1 device3, etc
+    pat = "\w+\d$"
+    return dirname.startswith(iid) and re.search(pat,dirname)
+            
+def find_sdid_for_path(dirpath):
+    # the sdid is encoded into the fname of the SDB file
+    sdid = ''
+    pat = 'SD(?P<SDID>\d+)\w+\d+_\d+_\d+.sdb'
+    for fname in os.listdir(dirpath):
+        m = re.match(pat, fname)
+        if m:
+            sdid = m.group('SDID')
+            break
+    if not sdid:
+        # some directories do not include the sdid in the SDB
+        # filename and instead have a file called SD00{SDID}.SD2
+        pat = 'SD0*(?P<SDID>\d+).SD2'
+        for fname in os.listdir(dirpath):
+            m = re.match(pat, fname)
+            if m:
+                sdid = m.group('SDID')
+                break
+    if not sdid:
+        log("No SDID found in: ...%s" % dirpath[-20:])
+    return sdid 
+
+def find_parts_dirs(dirpath, iid):
+    # traverse dirpath and look for subdirectories
+    # that match the naming conventions for part directories
+    subs = []
+    for child in os.listdir(dirpath):
+        if part_dir_test(child, iid):
+            subs.append(child)
+    return subs
+
+def list_match(instr, strlist):
+    """
+    Find the first string from strlist that is contained in instr.
+    Return the matching strlist element.
+    """
+    for pat in strlist:
+        if pat in instr:
+            return pat
+    return None
+
+            
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    # if user has specified a log filename, use that instead 
+    # of the default
+    if args['-L']:
+        logfile = args['-L']
+
+    with open(logfile, 'w') as loghandle:
+        src_root_path = args['SRCPATH']
+        dest_root_path = args['DESTPATH']
+
+        # get a list of source directories that need to be refactored
+        src_dirs = os.listdir(src_root_path)
+
+        # get a list of the correct iids to use when renaming the
+        # old directories that were named with erroneous iids
+        iid_corrections = {}
+        with open('sd_id_corrections.csv','r',encoding='ISO-8859-1') as ffix:
+            reader = csv.DictReader(ffix)
+            for row in list(reader):
+                iid_corrections[row['bad_iid']] = row['good_iid']
+
+        # Now traverse the source directories and look for the
+        # device-specific subdirectories that need to be promoted to 
+        # directories in their own right.
+        # Note: The term 'bad' in a varname means that the content
+        #       still references the bad iids.
+        dir_moves = {}
+        subdir_moves = {}
+        for bad_iid in src_dirs:
+            if bad_iid in iid_corrections:
+                good_iid = iid_corrections[bad_iid]
+                src_path = os.path.join(src_root_path, bad_iid)
+                dest_path = os.path.join(dest_root_path, good_iid)
+                if dest_path in dir_moves:
+                    log("Dir %s has already been given a target path."%src_path)
+                else:
+                    # Scan subfolders for the ones that should be promoted
+                    dir_moves[src_path] = dest_path
+                    bad_subs = find_parts_dirs(src_path, bad_iid)
+                    for bad_sub in bad_subs:
+                        bad_sub_path = os.path.join(src_path, bad_sub)
+                        sd_id = find_sdid_for_path(bad_sub_path)
+                        if sd_id: 
+                            good_sub = "%s_%s"%(good_iid,sd_id)
+                            dest_path = os.path.join(dest_root_path,good_sub)
+                            subdir_moves[bad_sub_path]=dest_path
+                        else:
+                            log("Could not find an SDID for subpart: %s"%bad_sub_path)
+            else:
+                log("No iid correction found for dir: %s"% target_dir)
+
+        # Lastly, we need to traverse each of the directories being moved,
+        # find any files that reference the bad iid in the filename, and
+        # then add it to a list of files that need to be renamed.
+        # This can be done on the filename itself, rather than with paths,
+        # because all filenames with iid elements should be unique.
+        bad_iids = iid_corrections.keys()
+        rename_targets = {}
+        for root,dirs,files in os.walk(src_root_path):
+            for fname in files:
+                bad_iid = list_match(fname, bad_iids)
+                if bad_iid:
+                    if fname in rename_targets:
+                        log("File %s should not already be in rename list"%fname)
+                    else:
+                        rename_targets[fname] = [bad_iid, 
+                                                iid_corrections[bad_iid]]
+
+
+        for sub_src in subdir_moves:
+            log("Moving subdir:\n  %s\n  %s"%(sub_src[80:],subdir_moves[sub_src][80:]))
+            # if args['--make-it-so']:
+        for src_dir in dir_moves:
+            log("Moving dir:\n  %s\n  %s"%(src_dir[80:],dir_moves[src_dir][80:]))
+            # if args['--make-it-so']:
+        if True:
+        # if args['--make-it-so']:
+        #     for root,dirs,files in os.walk(dest_root_path):
+        #         for fname in files:
+        #             for [fname,bad_iid,good_iid] in rename_targets:
+        # else:
+            for fname in rename_targets:
+                [bad_iid,good_iid] = rename_targets[fname]
+                log("Renaming file: %s (%s -> %s)"%(fname,bad_iid,good_iid))

@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+This script compares two directory trees to verify whether they contain
+identical data content, despite having potentially different hierarchies and filenames.
+
+This is done by creating a master list of all files in each tree (pathless), sorting it, and then running a checksum on each. This same operation should produce the same list of fingerprints on both versions of the file tree, regardless of names and hierarchy.  
+
+Usage:
+  verify_refactor [options] ROOTPATH1 ROOTPATH2
+  verify_refactor -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+import hashlib
+from tqdm import tqdm
+from docopt import docopt
+from pprint import pprint
+
+def mention(str):
+    if args['--verbose']:
+        print(str)
+        # verbose statements written to the log as well as the screen
+        # if loghandle:
+            # loghandle.write("%s\n"%str)
+
+def err(str):
+    log("ERR: %s"%str)
+    exit(1)
+
+def compute_checksum(fpath):
+    md5 = hashlib.md5()
+    mention("Verifying %s" % fpath)
+    with open(fpath, "rb") as fh:
+        for block in iter(lambda: fh.read(4096), b""):
+            md5.update(block)
+
+    return(md5.hexdigest())
+
+def list_all_filepaths(rootdir):
+    "Return a list of all filepaths rooted at rootdir."
+    fpaths = []
+    for root,dirs,files in os.walk(rootdir):
+        for f in files:
+            fpaths.append( os.path.join(root,f) )
+    return(sorted(fpaths, key=os.path.basename))
+
+def checksum_compare_filesets(fpaths1, fpaths2):
+    """
+    The challenge is to find a way to compare two sets of files for
+    identicality without being able to rely on the file names and paths.
+    So to do this, we'll traverse one entire pathlist and build a list 
+    with checksums for each. Then we'll traverse the second, compute a
+    checksum for each of those and remove them from the list.
+
+    If we compute a checksum for the second group that does not exist in
+    the checksums of the first group, then it's either already been removed (the file got duplicated) or the file got damaged (hence the reorged one has a different checksum) or it somehow got deleted from the
+    reorged hierarchy.
+
+    If the list of final checksums is empty, then everything is good.
+    """
+    checksum_list = []
+    missing_list = []
+    with tqdm(total=len(fpaths1)+len(fpaths2)) as pbar:
+        for fpath in fpaths1:
+            checksum_list.append( compute_checksum(fpath) )
+            pbar.update(1)
+
+        for fpath in fpaths2:
+            cs = compute_checksum(fpath)
+            if cs in checksum_list:
+                checksum_list.remove( compute_checksum(fpath) )
+            else:
+                missing_list.append(fpath)
+            pbar.update(1)
+
+    if missing_list:
+        print("The following dest files appear to be mangled:")
+        for path in missing_list:
+            print("  %s"%path)
+
+    if checksum_list:
+        print("The following src files were not found in destination:")
+        for path in checksum_list:
+            print("  %s"%path)
+    else:
+        print("Good news: All checksums match.")
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    rootpath1 = args['ROOTPATH1']
+    rootpath2 = args['ROOTPATH2']
+
+    fpaths1 = list_all_filepaths(rootpath1)
+    fpaths2 = list_all_filepaths(rootpath2)
+
+    if len(fpaths1) == len(fpaths2):
+        print("Good news. Both trees contain %d data files."%len(fpaths1))
+    else:
+        print("Bad news. DIR1 contains %d files while DIR2 has %d"%(len(fpaths1),len(fpaths2)))
+
+    checksum_compare_filesets(fpaths1, fpaths2)
+    # pprint(fpaths1)

@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+The Interact IDs associated with Victoria Wave1 SenseDoc files are incorrect. They were drawn from a temporary list of IDs rather than the definitive list. In order to correct this, we need to match up the incorrect ids with the appropriate ids. This script will read in the two id lists and match them together based on the SD_PID, which is the participant id assigned by SenseDoc. Once that translation table has been created, we'll be able to rename the directories properly.
+Usage:
+  idmerge [options] BADFILE GOODFILE SRCDIR
+  idmerge -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+import re
+import csv
+from docopt import docopt
+from pprint import pprint
+
+args = docopt(__doc__, version='0.1.1')
+badcsvfile = args['BADFILE']
+goodcsvfile = args['GOODFILE']
+source_dir = args['SRCDIR']
+
+corrections = {}
+with open('sd_id_corrections.csv', 'r', encoding='ISO-8859-1') as ffix:
+    reader = csv.DictReader(ffix)
+    fix_ids = list(reader)
+for row in fix_ids:
+    corrections[row['bad_iid']] = row['good_iid']
+
+count_dirs = 0
+count_matches = 0
+for src_id in os.listdir(source_dir):
+    count_dirs += 1
+    if src_id in corrections:
+        count_matches += 1
+    else:
+        print("ID %s missing from correction table."%src_id)
+print("Found %d source directories"%count_dirs)
+print("Found %d target names"%count_matches)
+
+exit()
+with open(badcsvfile, 'r', encoding='ISO-8859-1') as fbad:
+    reader = csv.DictReader(fbad)
+    bad_ids = list(reader)
+
+with open(goodcsvfile, 'r', encoding='ISO-8859-1') as fgood:
+    reader = csv.DictReader(fgood)
+    good_ids = list(reader)
+
+targets = {}
+for bad_row in bad_ids:
+    bad_id = bad_row['iid']
+    if bad_row['sd_pid']:
+        found = False
+        for good_row in good_ids:
+            if good_row['sd_pid'] == bad_row['sd_pid']:
+                good_id = good_row['iid']
+                # print("Bad ID %s has SD_PID %s which matches Good ID %s"%(bad_id,bad_row['sd_pid'],good_id))
+                targets[str(int(bad_id))] = good_id
+                found=True
+                break
+        if not found:
+            pass
+            # print("Bad ID %s/%s has no matching good id."%(bad_id,bad_row['sd_pid']))
+            # these will be handled by another algorithm below
+    else:
+        if args['--verbose']:
+            print("Bad ID %s has no matching SD_PID."%bad_id)
+            # probably because that participant did not use any SenseDocs
+
+# print("Found %d good matchups." % len(targets))
+# pprint(targets)
+print("bad_iid,good_iid")
+for srcid in targets:
+    print(srcid + ',' + targets[srcid])
+
+def get_sddid_from_dirname(dirname):
+    pat = '^SD(?P<small>\d+)fw(?P<large>\d+)_.*sdb$'
+    for file in os.listdir(dirname):
+        m = re.match(pat,file)
+        if m:
+            sd_did = "%s-%s" % (m.group('small'),m.group('large'))
+            return sd_did
+    return ''
+
+# A very few directories have no SD_PID so they can't be linked
+# to their proper IID by that method. 
+# For these, we'll look at the SD_DID encoded into the SDB file name
+# and try to match based on that.
+for dirname in os.listdir(source_dir):
+    if not dirname in targets:
+        print("SRCID %s has no target."%dirname)
+        print("  Trying to find matching SD_DID...")
+        sd_did = get_sddid_from_dirname(os.path.join(source_dir,dirname))
+        if sd_did:
+            print("  Got %s"% sd_did)
+            for good_row in good_ids:
+                if sd_did in good_row['sd_did']:
+                    print("    IID might be: %s"%good_row['iid'])
+        else:
+            print("  Got nothing")
+        
+
