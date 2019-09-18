@@ -41,6 +41,7 @@ import os
 import re
 import csv
 import datetime
+import subprocess as sub
 from docopt import docopt
 
 loghandle = None
@@ -131,7 +132,7 @@ if __name__ == '__main__':
         dest_root_path = args['DESTPATH']
 
         # get a list of source directories that need to be refactored
-        src_dirs = os.listdir(src_root_path)
+        src_dirs = os.listdir(src_root_path)[0]
 
         # get a list of the correct iids to use when renaming the
         # old directories that were named with erroneous iids
@@ -174,33 +175,47 @@ if __name__ == '__main__':
         # Lastly, we need to traverse each of the directories being moved,
         # find any files that reference the bad iid in the filename, and
         # then add it to a list of files that need to be renamed.
-        # This can be done on the filename itself, rather than with paths,
+        # This can be done on the fname itself, rather than with paths,
         # because all filenames with iid elements should be unique.
         bad_iids = iid_corrections.keys()
         rename_targets = {}
-        for root,dirs,files in os.walk(src_root_path):
-            for fname in files:
-                bad_iid = list_match(fname, bad_iids)
-                if bad_iid:
-                    if fname in rename_targets:
-                        log("File %s should not already be in rename list"%fname)
-                    else:
-                        rename_targets[fname] = [bad_iid, 
-                                                iid_corrections[bad_iid]]
+        for dirnm in src_dirs:
+            path = os.path.join(src_root_path,dirnm)
+            for root,dirs,files in os.walk(path):
+                for fname in files:
+                    bad_iid = list_match(fname, bad_iids)
+                    if bad_iid:
+                        if fname in rename_targets:
+                            log("File %s should not already be in rename list"%fname)
+                        else:
+                            rename_targets[fname] = [bad_iid, 
+                                                    iid_corrections[bad_iid]]
 
 
-        for sub_src in subdir_moves:
+        print("Moving subdirectories...")
+        for sub_src in tqdm(subdir_moves):
             log("Moving subdir:\n  %s\n  %s"%(sub_src[80:],subdir_moves[sub_src][80:]))
-            # if args['--make-it-so']:
-        for src_dir in dir_moves:
+            if args['--make-it-so']:
+                cmd = ['mv', sub_src, subdir_moves[sub_src]]
+                sub.call(cmd)
+        print("Moving participant directories...")
+        for src_dir in tqdm(dir_moves):
             log("Moving dir:\n  %s\n  %s"%(src_dir[80:],dir_moves[src_dir][80:]))
-            # if args['--make-it-so']:
-        if True:
-        # if args['--make-it-so']:
-        #     for root,dirs,files in os.walk(dest_root_path):
-        #         for fname in files:
-        #             for [fname,bad_iid,good_iid] in rename_targets:
-        # else:
+            if args['--make-it-so']:
+                cmd = ['mv', src_dir, dir_moves[src_dir]]
+                sub.call(cmd)
+        print("Renaming data files...")
+        if args['--make-it-so']:
+            for root,dirs,files in tqdm(os.walk(dest_root_path)):
+                for fname in files:
+                    if fname in rename_targets:
+                        [bad_iid,good_iid] = rename_targets[fname]
+                        src_path = os.path.join(root,fname)
+                        dest_path = src_path.replace(bad_iid,good_iid)
+                        log("Renaming file:\n  %s\n %s"%(src_path,dest_path))
+                        cmd = ['mv', src_path, dest_path]
+                        sub.call(cmd)
+        else:
             for fname in rename_targets:
                 [bad_iid,good_iid] = rename_targets[fname]
                 log("Renaming file: %s (%s -> %s)"%(fname,bad_iid,good_iid))
