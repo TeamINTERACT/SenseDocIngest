@@ -43,6 +43,7 @@ import csv
 import datetime
 import subprocess as sub
 from docopt import docopt
+from tqdm import tqdm
 
 loghandle = None
 logfile = datetime.datetime.now().strftime(".refactor_%Y%m%d-%H%M%S.log")
@@ -132,7 +133,7 @@ if __name__ == '__main__':
         dest_root_path = args['DESTPATH']
 
         # get a list of source directories that need to be refactored
-        src_dirs = os.listdir(src_root_path)[0]
+        src_dirs = os.listdir(src_root_path)   #[:1]
 
         # get a list of the correct iids to use when renaming the
         # old directories that were named with erroneous iids
@@ -192,17 +193,17 @@ if __name__ == '__main__':
                                                     iid_corrections[bad_iid]]
 
 
-        print("Moving subdirectories...")
+        print("Duplicating subdirectories...")
         for sub_src in tqdm(subdir_moves):
             log("Moving subdir:\n  %s\n  %s"%(sub_src[80:],subdir_moves[sub_src][80:]))
             if args['--make-it-so']:
-                cmd = ['mv', sub_src, subdir_moves[sub_src]]
+                cmd = ['cp', '-rp', sub_src, subdir_moves[sub_src]]
                 sub.call(cmd)
-        print("Moving participant directories...")
+        print("Duplicating participant directories...")
         for src_dir in tqdm(dir_moves):
             log("Moving dir:\n  %s\n  %s"%(src_dir[80:],dir_moves[src_dir][80:]))
             if args['--make-it-so']:
-                cmd = ['mv', src_dir, dir_moves[src_dir]]
+                cmd = ['cp', '-rp',  src_dir, dir_moves[src_dir]]
                 sub.call(cmd)
         print("Renaming data files...")
         if args['--make-it-so']:
