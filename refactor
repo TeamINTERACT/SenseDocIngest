@@ -195,17 +195,17 @@ if __name__ == '__main__':
                                                     iid_corrections[bad_iid]]
 
 
-        print("Duplicating subdirectories...")
+        print("Moving subdirectories...")
         for sub_src in tqdm(subdir_moves):
             log("Moving subdir:\n  %s\n  %s"%(sub_src[80:],subdir_moves[sub_src][80:]))
             if args['--make-it-so']:
-                cmd = ['cp', '-rp', sub_src, subdir_moves[sub_src]]
+                cmd = ['mv', sub_src, subdir_moves[sub_src]]
                 sub.call(cmd)
-        print("Duplicating participant directories...")
+        print("Moving participant directories...")
         for src_dir in tqdm(dir_moves):
             log("Moving dir:\n  %s\n  %s"%(src_dir[80:],dir_moves[src_dir][80:]))
             if args['--make-it-so']:
-                cmd = ['cp', '-rp',  src_dir, dir_moves[src_dir]]
+                cmd = ['mv',  src_dir, dir_moves[src_dir]]
                 sub.call(cmd)
         print("Renaming data files...")
         if args['--make-it-so']:
