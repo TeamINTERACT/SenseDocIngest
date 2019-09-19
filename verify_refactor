@@ -4,7 +4,9 @@
 This script compares two directory trees to verify whether they contain
 identical data content, despite having potentially different hierarchies and filenames.
 
-This is done by creating a master list of all files in each tree (pathless), sorting it, and then running a checksum on each. This same operation should produce the same list of fingerprints on both versions of the file tree, regardless of names and hierarchy.  
+This is done by creating two checksum fingerprint lists: one for all the files
+in each tree. We then compare the two lists to see that they contain identical
+sets of fingerprints.
 
 Usage:
   verify_refactor [options] ROOTPATH1 ROOTPATH2
@@ -19,20 +21,18 @@ import os
 import hashlib
 from tqdm import tqdm
 from docopt import docopt
-from pprint import pprint
 
 def mention(str):
+    """
+    A 'verbosity-aware' print statement.
+    """
     if args['--verbose']:
         print(str)
-        # verbose statements written to the log as well as the screen
-        # if loghandle:
-            # loghandle.write("%s\n"%str)
-
-def err(str):
-    log("ERR: %s"%str)
-    exit(1)
 
 def compute_checksum(fpath):
+    """
+    For a given absolute filepath, compute the md5 checksum fingerprint.
+    """
     md5 = hashlib.md5()
     mention("Verifying %s" % fpath)
     with open(fpath, "rb") as fh:
@@ -42,7 +42,9 @@ def compute_checksum(fpath):
     return(md5.hexdigest())
 
 def list_all_filepaths(rootdir):
-    "Return a list of all filepaths rooted at rootdir."
+    """
+    Return a list of all filepaths rooted at rootdir in absolute form.
+    """
     fpaths = []
     for root,dirs,files in os.walk(rootdir):
         for f in files:
@@ -63,30 +65,31 @@ def checksum_compare_filesets(fpaths1, fpaths2):
 
     If the list of final checksums is empty, then everything is good.
     """
-    checksum_list = []
-    missing_list = []
+    checksum_list = {}
+    unsourced_list = {}
     with tqdm(total=len(fpaths1)+len(fpaths2)) as pbar:
         for fpath in fpaths1:
-            checksum_list.append( compute_checksum(fpath) )
+            checksum_list[compute_checksum(fpath)] = fpath
             pbar.update(1)
 
         for fpath in fpaths2:
             cs = compute_checksum(fpath)
             if cs in checksum_list:
-                checksum_list.remove( compute_checksum(fpath) )
+                del checksum_list[cs]
+                # checksum_list.remove( compute_checksum(fpath) )
             else:
-                missing_list.append(fpath)
+                unsourced_list[cs] = fpath
             pbar.update(1)
 
-    if missing_list:
-        print("The following dest files appear to be mangled:")
-        for path in missing_list:
-            print("  %s"%path)
+    if unsourced_list:
+        print("The following dest files have no origin in the src tree:")
+        for cs in unsourced_list:
+            print("  %s  %s"%(cs, unsourced_list[cs]))
 
     if checksum_list:
-        print("The following src files were not found in destination:")
-        for path in checksum_list:
-            print("  %s"%path)
+        print("The following src files had no match in the dest tree:")
+        for cs in checksum_list:
+            print("  %s  %s"%(cs, checksum_list[cs]))
     else:
         print("Good news: All checksums match.")
 
@@ -106,4 +109,3 @@ if __name__ == '__main__':
         print("Bad news. DIR1 contains %d files while DIR2 has %d"%(len(fpaths1),len(fpaths2)))
 
     checksum_compare_filesets(fpaths1, fpaths2)
-    # pprint(fpaths1)
