@@ -54,9 +54,9 @@ def log(msg, prebreak=False):
             loghandle.write("\n")
         loghandle.write("%s\n" % msg)
         loghandle.flush()
-    if prebreak:
-        print('')
-    print("LOG: %s" % msg)
+    # if prebreak:
+    #     print('')
+    # print("LOG: %s" % msg)
 
 def mention(str):
     if args['--verbose']:
@@ -133,7 +133,7 @@ if __name__ == '__main__':
         dest_root_path = args['DESTPATH']
 
         # get a list of source directories that need to be refactored
-        src_dirs = os.listdir(src_root_path)   #[:1]
+        src_dirs = os.listdir(src_root_path)  #[:1]
 
         # get a list of the correct iids to use when renaming the
         # old directories that were named with erroneous iids
@@ -154,7 +154,9 @@ if __name__ == '__main__':
             if bad_iid in iid_corrections:
                 good_iid = iid_corrections[bad_iid]
                 src_path = os.path.join(src_root_path, bad_iid)
-                dest_path = os.path.join(dest_root_path, good_iid)
+                sd_id = find_sdid_for_path(src_path)
+                good_dir = "%s_%s"%(good_iid,sd_id)
+                dest_path = os.path.join(dest_root_path, good_dir)
                 if dest_path in dir_moves:
                     log("Dir %s has already been given a target path."%src_path)
                 else:
