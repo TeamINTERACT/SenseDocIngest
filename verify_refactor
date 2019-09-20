@@ -46,15 +46,18 @@ def mention(str):
 
 def compute_checksum(fpath):
     """
-    For a given absolute filepath, compute the md5 checksum fingerprint.
+    For a given absolute filepath, compute the checksum fingerprint.
+    Apparently blake2s is faster than md5, and since the method doesn't
+    really matter, I'm using blake.
     """
-    md5 = hashlib.md5()
+    # fingerprinter = hashlib.md5()
+    fingerprinter = hashlib.blake2s()
     mention("Verifying %s" % fpath)
     with open(fpath, "rb") as fh:
         for block in iter(lambda: fh.read(4096), b""):
-            md5.update(block)
+            fingerprinter.update(block)
 
-    return(md5.hexdigest())
+    return(fingerprinter.hexdigest())
 
 def list_all_filepaths(rootdir):
     """
@@ -107,18 +110,18 @@ def checksum_compare_filesets(fpaths1, fpaths2):
             if finger in src_checksums:
                 del src_checksums[finger]
             else:
-                unsourced_list[finger] = src_checksums[fpath]
+                unsourced_list[finger] = src_checksums[finger]
             pbar.update(1)
 
     if unsourced_list:
         log("The following dest files have no origin in the src tree:")
-        for cs in unsourced_list:
-            log("  %s  %s"%(cs, unsourced_list[cs]))
+        for finger in unsourced_list:
+            log("  %s  %s"%(finger, unsourced_list[finger]))
 
     if src_checksums:
         log("The following src files had no match in the dest tree:")
-        for cs in src_checksums:
-            log("  %s  %s"%(cs, src_checksums[cs]))
+        for finger in src_checksums:
+            log("  %s  %s"%(finger, src_checksums[finger]))
     else:
         log("Good news: All checksums match.")
 

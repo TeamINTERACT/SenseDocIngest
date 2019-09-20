@@ -175,11 +175,12 @@ if __name__ == '__main__':
             else:
                 log("No iid correction found for dir: %s"% target_dir)
 
-        # Lastly, we need to traverse each of the directories being moved,
+        # Lastly, we need to traverse each directory being moved,
         # find any files that reference the bad iid in the filename, and
         # then add it to a list of files that need to be renamed.
         # This can be done on the fname itself, rather than with paths,
-        # because all filenames with iid elements should be unique.
+        # because all filenames with iid elements in it should be unique
+        # across the entire hierarchy.
         bad_iids = iid_corrections.keys()
         rename_targets = {}
         for dirnm in src_dirs:
