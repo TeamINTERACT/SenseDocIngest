@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+This script pulls data from an SD directory and reconstructs the filename that should be applied to the SDB file from the raw source files.
+
+Usage:
+  sdb_generate_filename [options] DIRPATH
+  sdb_generate_filename -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+import re
+from docopt import docopt
+from datetime import datetime, timedelta
+from pprint import pprint
+
+def mention(str):
+    """
+    A 'verbosity-aware' print statement.
+    """
+    if args['--verbose']:
+        print(str)
+
+def get_timestamp_seconds(instr):
+    pat = "^{(?P<seconds>\d+)}"
+    m = re.match(pat, instr)
+    seconds = 0
+    if m:
+        seconds = int(m.group('seconds'))
+    return seconds
+    
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    dirpath = args['DIRPATH']
+
+    logpath = ''
+    syspath = os.path.join(dirpath, "System")
+    if os.path.isdir(syspath):
+        for file in os.listdir(syspath):
+            if file.lower().startswith('log'):
+                logpath = os.path.join(syspath,file)
+    else:
+        print("No System directory found. Aborting.")
+        exit(1)
+
+    if logpath:
+        mention("Examining log file: %s"% logpath)
+        idnumber = ''
+        fwnumber = ''
+        exdate = ''
+        fwline = ''
+        dateline = ''
+        dateseconds = 0
+        usbseconds = 0
+        fwpat = "ID: (?P<id>\d+).*firmware: (?P<fw>\d+)$"
+        datepat = "%y/%m/%d,%H:%M:%S"
+        # this loop will pull the last occurrence of the firmware number
+        # and system date from the file that coincides with a USB 
+        # connection.
+        with open(logpath, 'r', encoding='ISO-8859-1') as fh:
+            for line in fh.readlines():
+                if "firmware" in line: 
+                    fwline = line
+                    mention("Noting fwline: %s"%fwline)
+                if "Date systeme" in line: 
+                    dateline = line
+                    mention("Noting dateline: %s"%dateline)
+                if "USB Connecte" in line:
+                    mention("Found a USB connection line.")
+                    if fwline:
+                        # words = fwline.strip().split()
+                        # fwnumber = words[-1]
+                        m = re.search(fwpat,fwline)
+                        if m:
+                            idnumber=m.group('id')
+                            fwnumber=m.group('fw')
+                    else:
+                        mention("No fwline found yet.")
+                    if dateline:
+                        datestr = dateline[-18:].strip()
+                        mention("Datestr: %s"%datestr)
+                        exdate = datetime.strptime(datestr,datepat)
+                        # For completeness, we also have to look at
+                        # the delay between declaring the system time
+                        # and actually beginning the data extraction.
+                        # To do this, we need to look at the datestamp
+                        # associated with each log record, compute the
+                        # difference, and then add that as seconds to
+                        # the declared datetime. It's usually only a 
+                        # couple of seconds, but we might as well be
+                        # accurate.
+                        datesecs = get_timestamp_seconds(dateline)
+                        usbsecs = get_timestamp_seconds(line)
+                        offset = usbsecs - datesecs
+                        exdate += timedelta(0, offset)
+                    else:
+                        mention("No dateline found yet.")
+        if idnumber:
+            print("Device ID number is: %s"%idnumber)
+        else:
+            print("Device ID number not found. Using 000.")
+            idnumber = '000'
+        if fwnumber:
+            print("Firmware number is: %s"%fwnumber)
+        else:
+            print("Firmware number not found. Using 0000.")
+            fwnumber = '0000'
+        if exdate:
+            exdate = exdate.strftime("%Y%m%d_%H%M%S")
+            print("Extraction date is: %s"%exdate)
+        else:
+            print("Extraction date not found. Using 2000-01-01 00:00:00.")
+            exdate = '20010101_000000'
+        outfn = "SD%sfw%s_%s.sdb"% (idnumber, fwnumber, exdate)
+        print("Filename should be: %s"% outfn)
+    else:
+        log("No LOG file found in System directory. Aborting.")
+        exit(1)
