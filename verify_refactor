@@ -110,7 +110,7 @@ def checksum_compare_filesets(fpaths1, fpaths2):
             if finger in src_checksums:
                 del src_checksums[finger]
             else:
-                unsourced_list[finger] = src_checksums[finger]
+                unsourced_list[finger] = dest_checksums[finger]
             pbar.update(1)
 
     if unsourced_list:
