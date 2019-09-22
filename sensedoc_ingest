@@ -40,8 +40,9 @@ dbname = 'interact_db'
 logfile = datetime.datetime.now().strftime(".ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
-# number of processing threads to run
-num_threads = 1
+# a stat we can track to give confidence that the ingest worked
+expected_gps_rows = 0
+gps_file_row_counts = {}
 
 def log(msg, prebreak=False):
     if loghandle:
@@ -136,7 +137,12 @@ def select_usable_files(filelist, iidstr):
                 c.execute(sql_n)
                 row = c.fetchone()
                 if row:
-                    count = row[0]
+                    count = int(row[0])
+
+                # hang onto these counts for final stats
+                # after the ingest is finished
+                gps_file_row_counts[fpath] = count
+                
 
         except Exception as e:
             log("Caught a SQL error while counting records.")
@@ -183,13 +189,7 @@ def select_usable_files(filelist, iidstr):
     log("No usable data files from participant %s." % iidstr)
     return None
 
-def execute_copy_via_shell(argset):
-    # The easiest way to invoke this func from the thread pool manager
-    # is to pack up the arguments for each call into a list. So first
-    # we have to unpack the function arguments.
-    [filepath, tablename, selectionsql, pid] = argset
-
-    # Now we have everything we need to ingest the given datafile. 
+def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
     # On the command line we could run a single command to
     # pull data from the sqlite file with sqlite3 and ingest into the 
     # postgres by piping the output directly to psql.
@@ -226,13 +226,15 @@ def execute_copy_via_shell(argset):
     # So, to eliminate duplicates, we'll create a dummy table and load
     # the data into that, and then use INSERT ON CONFLICT DO NOTHING to
     # ignore duplicates as we copy the dummy table to the live table.
-    # print("Filepath: %s"%filepath)
-    # print("Tablename: %s"%tablename)
-    # print("PID: %s"%pid)
-    # tableid = '_%s_%s' % (tablename, pid)
+    
+    # Create a suffix that will be appended to the temporary loading
+    # tablename. This way, if we have multiple threads loading files,
+    # they'll be stuffing distinct ingest tables and we can roll one
+    # back cleanly on failure without compromising the others.
     tableid = '_%s_%s' % (filepath[-20:],tablename)
+
+    # eliminate illegal chars in tableid
     tableid = tableid.translate({ord(i):None for i in '-./'})
-    # tableid = ''
     copycmd = """
              CREATE TABLE level_0.deleteme{tid} (LIKE level_0.{tn}); 
              COPY level_0.deleteme{tid} FROM STDIN delimiter '|' CSV;
@@ -241,6 +243,18 @@ def execute_copy_via_shell(argset):
              ON CONFLICT (iid,ts) DO NOTHING;
              DROP TABLE level_0.deleteme{tid};
              """.format(tn=tablename,tid=tableid)
+
+    # NOTE: There's still a minor issue here. We tend to want to ingest
+    # an entire wave at a time, but if something goes wrong partway 
+    # through, we don't have an elegant way to rollback the ingest and 
+    # start it again. As it stands, running an ingest a second time 
+    # should work fine, since the INSERT ON CONFLICT will simply ignore
+    # records that were already ingested. This will admittedly take up 
+    # a lot of time, loading all the previously ingested participants 
+    # only to ignore their records at copy time. But processing the 
+    # entire wave and ignoring records we already have seems the more
+    # robust solution as it is less likely to accidentally omit data
+    # by trying to be clever about skipping redundant ingests.
 
     cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath,
                                                         selectionsql,
@@ -255,14 +269,22 @@ def execute_copy_via_shell(argset):
         return False
     return True
 
-def ingest_sdb_file(argset):
+def ingest_sdb_file(filepath,iidstr):
     """
     Given an SDB datafile, load its tables into the database,
     tagged with the iid of the participant who produced it.
     Return True if file ingested properly, False otherwise
     """
-    [filepath,iidstr] = argset
     refDate = ''
+    # We counted file rows when we were validating the files, 
+    # so now that we know this file is being ingested, add its
+    # row count to the total number of rows we're trying to ingest.
+    global expected_gps_rows
+    if filepath in gps_file_row_counts:
+        expected_gps_rows += gps_file_row_counts[filepath]
+    else:
+        log("SDB FILE '%s' was never row-counted.")
+
     log("Ingesting file: %s"%filepath)
     with sqlite3.connect(filepath) as conn:
         # get the reference date from the SDB from which all 
@@ -271,32 +293,10 @@ def ingest_sdb_file(argset):
         c.execute("SELECT value FROM ancillary WHERE key='refDate'")
         refDate = c.fetchone()[0]
 
+
     if not refDate:
         log("Unable to get refDate from file %s"%filepath)
         return False
-
-    # From the prototype system, the fuse_sd_pdata.py script contains
-    # a number of data scrubbing and polishing steps. These same steps
-    # need to be implemented in this newer (and hopefully faster) ingest
-    # system.
-    # X Reject filesets with overlapping time windows (and notify admin)
-    # X Add the participant's iid to every sample record
-    # X Merge the timestamps into one value with millisec precision
-    # X Scale the x,y,z values of the accel table
-    # X Set empty string as default value for all text and char fields
-    # X All fields must be NOT NULL and have sensible defaults
-    # X gps.lat must be between -90 and 90 inclusive
-    # X gps.lon must be between -180 and 180 inclusive
-    # X gps.sat_in_view to integer and default to -1
-    # - Reject records that duplicate existing value of iid,ts
-    #      Unfortunately, the records with duplicate timestamps are 
-    #      not duplicated in all fields, so we can't just do
-    #      a simple SAMPLE DISTINCT when exporting from the SQLite file.
-    #      Consequently, the most efficient solution I've found is to
-    #      load the file into a dummy DB table and then copy from there 
-    #      into the actual table with INSERT ON CONFLICT DO NOTHING.
-    #      It requires a second pass of the ingested data, but it's a
-    #      pretty efficient second pass.
 
     # Each table in the SQLite file needs its own SELECT stmt
     # to ensure data is read from the file in a known format.
@@ -346,64 +346,21 @@ def ingest_sdb_file(argset):
         # written to the file, keeping only the latest instance in cases
         # where records share the same timestamp info.
 
-    # Also need a field assignement stmt for the ON CONFLICT clause
-    # updatesql = {}
-    # updatesql['sd_gps'] = """
-    #                 SET lat = EXCLUDED.lat,
-    #                     lon = EXCLUDED.lon,
-    #                     speed = EXCLUDED.speed,
-    #                     course = EXCLUDED.course,
-    #                     alt = EXCLUDED.alt,
-    #                     sat_used = EXCLUDED.sat_used,
-    #                     pdop = EXCLUDED.pdop,
-    #                     hdop = EXCLUDED.hdop,
-    #                     vdop = EXCLUDED.vdop,
-    #                     sat_in_view = EXCLUDED.sat_in_view
-    #                     """
-    # updatesql['sd_accel'] = """
-    #                 SET x = EXCLUDED.x,
-    #                     y = EXCLUDED.y,
-    #                     z = EXCLUDED.z
-    #                     """
-
-    # In a moment, we're going to ingest the individual files into the 
-    # DB, but to do it quickly, we're going to dispatch multiple 
-    # threads. In preparation for that step, we're going to
-    # pre-construct the set of parameters that will be passed to the
-    # actual ingestor function - one set of args for each invocation.
-    success = True
-    argsets = []
-    for i,tbl in enumerate(selectionsql):
-        argsets.append([filepath, tbl, 
-                        selectionsql[tbl], 
-                        # updatesql[tbl], 
-                        i])
-
     # Now ingest each of the required tables into the DB.
-
-    # Create multiple threads and dispatch them to run 
-    # func execute_copy_via_shell() against each argset.
-    # Then take all the boolean results and see if they all succeeded.
-    # with PoolExecutor(max_workers=4) as executor:
-    #     resultlist = executor.map(execute_copy_via_shell, argsets)
-    #     success = all(resultlist)
-    for argset in argsets:
-        success = success and execute_copy_via_shell(argset)
-# I NEED TO COMPARE NUMBER OF RECORDS INGESTED AGAINST NUMBER
-# ORIGINALLY COUNTED IN THE FILE
+    success = True
+    for i,tbl in enumerate(selectionsql):
+        success = success and execute_copy_via_shell(filepath, tbl, 
+                                                     selectionsql[tbl], 
+                                                     i)
     return success
 
 
-def ingest_user_files(argset):
+def ingest_user_files(iidstr, filepathlist):
     """
     Given an interact_id string and a list of filepaths, 
     perform basic acceptance tests on the data files and
     if they pass, load them into the database, tagged with the iid.
-    Argset is expected to contain: 
-              iidstr: the interact_id of the participant
-        filepathlist: the list of files to be ingested
     """
-    [iidstr, filepathlist] = argset
     log("Ingesting files for user: %s" % iidstr, prebreak=True)
 
     # Perform basic acceptability tests on the candidate files
@@ -418,18 +375,42 @@ def ingest_user_files(argset):
 
     # now actually ingest the datafiles
     success = True
-    argsets = []
     for [min_dt, max_dt, count, sdbfile] in ingest_file_stats:
-        argsets.append( [sdbfile, iidstr] )
+        result = ingest_sdb_file(sdbfile,iidstr)
+        success = success and result
 
-# I NEED TO TEST THE NUMBER OF RECORDS INGESTED VS THE NUMBER 
-# ORIGINALLY COUNTED IN THE FILES AND REPORT THE NUMBER OF CULLED
-# RECORDS IN THE LOG
-    with PoolExecutor(max_workers=num_threads) as executor:
-        resultlist = executor.map(ingest_sdb_file, argsets)
-        success = all(resultlist)
-    
     return success
+
+import psycopg2
+# from sqlalchemy import create_engine
+db_host = os.environ["SQL_LOCAL_SERVER"]
+db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+db_user = os.environ["SQL_USER"]
+db_name = os.environ["SQL_DB"]
+db_schema = os.environ["SQL_SCHEMA"]
+
+def count_db_rows(tablename):
+    """
+    Given the name of a table in the Postgres DB, return 
+    the row-count from that table.
+    """
+    # dbURI = 'postgresql://{}@{}:{}/{}'.format(db_user,
+    #                                 db_host, db_host_port,
+    #                                 db_name)
+    # engine = create_engine(dbURI)
+    # engine.execute(q)
+    count=-1
+    with psycopg2.connect(user=db_user,
+                          host=db_host,
+                          port=db_host_port,
+                          database=db_name) as conn:
+        c = conn.cursor()
+        sql = "SELECT count(1) FROM %s.%s" % (db_schema,tablename)
+        c.execute(sql)
+        count = int(c.fetchone()[0])
+    return count
+
+
 
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
@@ -469,14 +450,15 @@ if __name__ == '__main__':
         # The directory name is the participant's iid, followed by the 
         # id of the SD device, so the sdb files for a 
         # particular participant can appear in multiple folders. 
-        argsets = []
-        for pid,dirpath in enumerate(os.listdir(rootdir)):
-            if not target_iids or dirpath in target_iids:
-                argsets.append( [rootdir,dirpath] )
+        # argsets = []
+        # for pid,dirpath in enumerate(os.listdir(rootdir)):
+        #     if not target_iids or dirpath in target_iids:
+        #         argsets.append( [rootdir,dirpath] )
 
-        # So there's no point in trying to ingest a directory. What makes
-        # more sense is to ingest all the specific sdb files associated
-        # with a particular user.
+        # So there's no point in trying to ingest by directory, because
+        # a single participant's SDBs can be found in multiple
+        # directories. What makes more sense is to ingest all the 
+        # specific sdb files associated with a particular user.
         participant_files = {}
         for foldername in os.listdir(rootdir):
             folderpath = os.path.join(rootdir, foldername)
@@ -494,15 +476,42 @@ if __name__ == '__main__':
                             participant_files[iidstr] = []
                         participant_files[iidstr].append(filepath)
 
-        # we now have a dictionary that maps each participant id to
-        # a list of sdb filepaths, which may or may not occur in 
-        # different folders of the archive tree
-        argsets = []
+        # Before we ingest the files, take a row count from the existing
+        # DB tables so that we can count again post-ingest and compare
+        # against the number of rows we intended to ingest from each
+        # of the SDB files. This will give some measure of confidence
+        # as to whether the ingest was successful.
+        # In this pre-ingest count, we report both GPS and Accel counts,
+        # despite the higher cost of counting accel rows, so that we
+        # have a rollback point if the ingest crashes.
+        baseline_gps_rows = count_db_rows('sd_gps')
+        baseline_accel_rows = count_db_rows('sd_accel')
+        log("Baseline GPS Count: %d"%baseline_gps_rows)
+        log("Baseline Accel Count: %d"%baseline_accel_rows)
+
+        # We now have a dictionary that maps each participant id to
+        # a list of their sdb filepaths.
         for iidstr in participant_files:
             if participant_files[iidstr]:
-                argsets.append( [iidstr, participant_files[iidstr]] )
+                result = ingest_user_files(iidstr,
+                                           participant_files[iidstr])
 
-        with PoolExecutor(max_workers=num_threads) as executor:
-            resultlist = executor.map(ingest_user_files, argsets)
-            # clean = all(resultlist)
+        # Count final GPS table size
+        final_gps_rows = count_db_rows('sd_gps') 
+
+        # Report before, after, and expected row counts. After the
+        # initial baseline, we only track GPS table rows, as they are 
+        # much smaller than the accel tables, so they're much faster to 
+        # compute and still provide a reasonable metric of success.
+        log("Baseline GPS Count: %d"%baseline_gps_rows)
+        log("Expected GPS Count: %d"%(baseline_gps_rows+expected_gps_rows))
+        log("Complete GPS Count: %d"%final_gps_rows)
+        ingested_gps_rows = final_gps_rows - baseline_gps_rows
+        ingest_rate = 100.0*ingested_gps_rows/float(expected_gps_rows)
+        if ingest_rate > 99.5:
+            log("Ingest looks successful with %0.2f%% row retention. Remember, some minor row loss is expected due to timestamp duplication in SDB files."%ingest_rate)
+        else:
+            log("Row retention of %0.2f%% looks low."%ingest_rate) 
+            log("Minor row loss is expected due to duplicated timestamps in the SDB files, but this seems excessive.")
+            log("But if this was a re-ingest of an uncompleted previous ingest cycle, high row loss is to be expected.")
 
