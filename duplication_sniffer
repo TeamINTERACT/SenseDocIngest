@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+This script walks a directory tree and looks in every SDB file it finds,
+counting the number of duplicated timestamps.
+
+The current ingest process has reported a seemingly high number of dropped rows for Montreal (1.1%) and I want to see whether that can be attributed to duplicate rows.
+
+Usage:
+  duplication_sniffer [options] ROOTPATH
+  duplication_sniffer -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -L FNAME      Save log to FNAME
+    -i IID        Examine participant IID only
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+# import re
+# import csv
+import sqlite3
+import datetime
+# import subprocess as sub
+from docopt import docopt
+from tqdm import tqdm
+
+loghandle = None
+logfile = datetime.datetime.now().strftime("duplication_report.log")
+
+def log(msg, prebreak=False):
+    if loghandle:
+        if prebreak:
+            loghandle.write("\n")
+        loghandle.write("%s\n" % msg)
+        loghandle.flush()
+    # if prebreak:
+    #     print('')
+    # print("LOG: %s" % msg)
+
+def mention(str):
+    if args['--verbose']:
+        print(str)
+        # verbose statements written to the log as well as the screen
+        # if loghandle:
+            # loghandle.write("%s\n"%str)
+
+def err(str):
+    log("ERR: %s"%str)
+    exit(1)
+
+def is_iid(instr):
+    return all([x in '0123456789' for x in instr])
+
+def part_dir_test(dirname, iid):
+    # part dirs start with the iid and end with things like
+    # -part1 -part2 or device1 device3, etc
+    pat = "\w+\d$"
+    return dirname.startswith(iid) and re.search(pat,dirname)
+            
+def find_sdid_for_path(dirpath):
+    # the sdid is encoded into the fname of the SDB file
+    sdid = ''
+    pat = 'SD(?P<SDID>\d+)\w+\d+_\d+_\d+.sdb'
+    for fname in os.listdir(dirpath):
+        m = re.match(pat, fname)
+        if m:
+            sdid = m.group('SDID')
+            break
+    if not sdid:
+        # some directories do not include the sdid in the SDB
+        # filename and instead have a file called SD00{SDID}.SD2
+        pat = 'SD0*(?P<SDID>\d+).SD2'
+        for fname in os.listdir(dirpath):
+            m = re.match(pat, fname)
+            if m:
+                sdid = m.group('SDID')
+                break
+    if not sdid:
+        log("No SDID found in: ...%s" % dirpath[-20:])
+    return sdid 
+
+def find_parts_dirs(dirpath, iid):
+    # traverse dirpath and look for subdirectories
+    # that match the naming conventions for part directories
+    subs = []
+    for child in os.listdir(dirpath):
+        if part_dir_test(child, iid):
+            subs.append(child)
+    return subs
+
+def list_match(instr, strlist):
+    """
+    Find the first string from strlist that is contained in instr.
+    Return the matching strlist element.
+    """
+    for pat in strlist:
+        if pat in instr:
+            return pat
+    return None
+
+def count_duplicate_timestamps(fpath):
+    """
+    Given an SDB filepath, query its GPS table and count the number
+    of records that will be dropped due to redundant timestamps.
+    """
+    total_count = 0
+    drop_count = 0
+    sql_tot = "SELECT count(1) AS n FROM gps;"
+    sql_dups = "SELECT ts,count(1) AS n FROM gps GROUP BY ts HAVING n>1;"
+    # log("Counting in SDB file %s"% fpath)
+    with sqlite3.connect(fpath) as conn:
+        c = conn.cursor()
+
+        # count total rows in file
+        c.execute(sql_tot)
+        total_count = int(c.fetchone()[0])
+
+        # count duplicates in file
+        c.execute(sql_dups)
+        for row in c.fetchall():
+            rowcount = int(row[1])
+            # one of each set of duplicated records will be kept
+            # so the number dropped will be one less
+            drop_count += rowcount-1
+    return drop_count, total_count
+
+            
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    # if user has specified a log filename, use that instead 
+    # of the default
+    if args['-L']:
+        logfile = args['-L']
+
+    root_path = args['ROOTPATH']
+
+    count_sdb_files = 0
+    for headdir,dirs,files in os.walk(root_path, followlinks=True):
+        for fname in files:
+            if fname.lower().endswith(".sdb"):
+                count_sdb_files += 1
+
+    total_rows = 0
+    total_dropped = 0
+    with open(logfile, 'w') as loghandle:
+        # Now traverse the source directories and look for the
+        # device-specific subdirectories that need to be promoted to 
+        # directories in their own right.
+        # Note: The term 'bad' in a varname means that the content
+        #       still references the bad iids.
+        with tqdm(total=count_sdb_files) as pbar:
+            for headdir,dirs,files in os.walk(root_path, followlinks=True):
+                for fname in files:
+                    fpath = os.path.join(root_path, headdir, fname)
+                    if fname.lower().endswith(".sdb"):
+                        dups,tot = count_duplicate_timestamps(fpath)
+                        log("%d, %d, %s" % (dups, tot, fpath))
+                        total_dropped += dups
+                        total_rows += tot
+                        pbar.update(1)
+        log("%d, TOTAL ROWS" % total_rows) 
+        log("%d, TOTAL DROPPED" % total_dropped) 
+        log("%0.2f  TOTAL DROP RATE" % (100.0*float(total_dropped)/total_rows))
