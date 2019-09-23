@@ -37,7 +37,7 @@ from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 # data files to be included in the database
 min_sample_threshold = 3600 # equates to 1 hour of usable data
 dbname = 'interact_db'
-logfile = datetime.datetime.now().strftime(".ingest_%Y%m%d-%H%M%S.log")
+logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
 # a stat we can track to give confidence that the ingest worked
@@ -166,9 +166,11 @@ def select_usable_files(filelist, iidstr):
         for stat1,stat2 in combinations(fstats,2):
             if test_overlapping_daterange(stat1[0], stat1[1], 
                                           stat2[0], stat2[1]):
-                spanstr = "   %s - %s\n   %s - %s"%(stat1[0], stat1[1], 
-                                                stat2[0], stat2[1])
-                log("Overlapping timestamps found between files:\n  %s\n  %s" % (stat1[3],stat2[3]))
+                log("Overlapping timestamps found between files:")
+                log("  %s" % (stat1[3]))
+                log("    %s -> %s"%(stat1[0], stat1[1])) 
+                log("    %s -> %s"%(stat2[0], stat2[1])) 
+                log("  %s" % (stat2[3]))
                 return None
             else:
                 log("Overlap clean.")
