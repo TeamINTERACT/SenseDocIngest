@@ -29,15 +29,16 @@ from tqdm import tqdm
 loghandle = None
 logfile = datetime.datetime.now().strftime("duplication_report.log")
 
-def log(msg, prebreak=False):
+def log(msg, prebreak=False, screen=False):
     if loghandle:
         if prebreak:
             loghandle.write("\n")
         loghandle.write("%s\n" % msg)
         loghandle.flush()
-    # if prebreak:
-    #     print('')
-    # print("LOG: %s" % msg)
+    if screen:
+        if prebreak:
+            print('')
+        print("LOG: %s" % msg)
 
 def mention(str):
     if args['--verbose']:
@@ -105,11 +106,24 @@ def count_duplicate_timestamps(fpath):
     Given an SDB filepath, query its GPS table and count the number
     of records that will be dropped due to redundant timestamps.
     """
+    ill_count = 0
+    dup_count = 0
     total_count = 0
-    drop_count = 0
     sql_tot = "SELECT count(1) AS n FROM gps;"
     sql_dups = "SELECT ts,count(1) AS n FROM gps GROUP BY ts HAVING n>1;"
-    # log("Counting in SDB file %s"% fpath)
+    sql_illegals = """
+        SELECT count(1) FROM gps 
+        WHERE lat is null
+           OR lon is null
+           OR lat NOT BETWEEN -90 and 90
+           OR lon NOT BETWEEN -180 and 180
+           OR alt NOT BETWEEN -10000 and 100000
+           OR course NOT BETWEEN -360 and 360
+           OR speed NOT BETWEEN 0 and 1000
+           OR sat_used NOT BETWEEN 0 and 50 
+           OR sat_in_view NOT BETWEEN 0 and 50;
+        """
+    mention("Counting in SDB file: %s"% fpath)
     with sqlite3.connect(fpath) as conn:
         c = conn.cursor()
 
@@ -123,10 +137,14 @@ def count_duplicate_timestamps(fpath):
             rowcount = int(row[1])
             # one of each set of duplicated records will be kept
             # so the number dropped will be one less
-            drop_count += rowcount-1
-    return drop_count, total_count
+            dup_count += rowcount-1
 
-            
+        # count illegal rows in file
+        c.execute(sql_illegals)
+        ill_count = int(c.fetchone()[0])
+    return dup_count, ill_count, total_count
+
+
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
 
@@ -144,6 +162,8 @@ if __name__ == '__main__':
                 count_sdb_files += 1
 
     total_rows = 0
+    total_dups = 0
+    total_ills = 0
     total_dropped = 0
     with open(logfile, 'w') as loghandle:
         # Now traverse the source directories and look for the
@@ -154,13 +174,18 @@ if __name__ == '__main__':
         with tqdm(total=count_sdb_files) as pbar:
             for headdir,dirs,files in os.walk(root_path, followlinks=True):
                 for fname in files:
-                    fpath = os.path.join(root_path, headdir, fname)
+                    fpath = os.path.join(headdir, fname)
                     if fname.lower().endswith(".sdb"):
-                        dups,tot = count_duplicate_timestamps(fpath)
+                        dups,ills,tot = count_duplicate_timestamps(fpath)
                         log("%d, %d, %s" % (dups, tot, fpath))
-                        total_dropped += dups
+                        total_dups += dups
                         total_rows += tot
+                        total_ills += ills
+                        total_dropped += ills + dups
                         pbar.update(1)
-        log("%d, TOTAL ROWS" % total_rows) 
-        log("%d, TOTAL DROPPED" % total_dropped) 
-        log("%0.2f  TOTAL DROP RATE" % (100.0*float(total_dropped)/total_rows))
+        log("RESULT OF SEARCH FOR ILLEGAL ROWS")
+        log("%d, TOTAL ROWS" % total_rows, screen=True) 
+        log("%d, TOTAL DUPS" % total_dups, screen=True) 
+        log("%d, TOTAL ILLS" % total_ills, screen=True) 
+        log("%d, TOTAL DROPPED" % total_dropped, screen=True) 
+        log("%0.5f%%  TOTAL DROP RATE" % (100.0*float(total_dropped)/total_rows), screen=True)

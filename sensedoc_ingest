@@ -44,7 +44,7 @@ loghandle = None
 expected_gps_rows = 0
 gps_file_row_counts = {}
 
-def log(msg, prebreak=False):
+def log(msg, prebreak=False, screen=False):
     if loghandle:
         if prebreak:
             loghandle.write("\n")
@@ -99,16 +99,6 @@ def select_usable_files(filelist, iidstr):
     # Accel tables are MUCH denser and take a lot longer to scan.
     # So to speed up the process, I'm assuming that if the gps table 
     # contains good dates and data, the accel table will as well. 
-    # sql = """
-    #         SELECT MIN(utcdate) as mindate,
-    #                MAX(utcdate) as maxdate,
-    #                COUNT(*) as count
-    #         FROM gps
-    #         """
-            # It turns out that the following 3 queries are MUCH
-            # faster than the one above, executing in about 1/8th 
-            # the time. And since there's a non-trivial amount of 
-            # time spent doing this, it's worth optimizing.
     sql_min = "SELECT utcdate from gps order by ts ASC limit 1"
     sql_max = "SELECT utcdate from gps order by ts DESC limit 1"
     sql_n   = "SELECT count(1) as n from gps"
@@ -152,7 +142,6 @@ def select_usable_files(filelist, iidstr):
         if mindate and maxdate and count:
             log("Keeping file %s"% fpath)
             fstats.append([mindate,maxdate,count,fpath])
-            # good_files.append(fpath)
         else: # otherwise leave this file out of the list
             log("File %s unacceptable (%s, %s, %s)" % (fpath,
                                                         mindate,
@@ -177,6 +166,11 @@ def select_usable_files(filelist, iidstr):
         # total the number of samples from all files and
         # reject the filelist if the number of samples does not
         # meet the minimum threshold
+
+        # COULD THIS BE WHERE THE HIGH NUMBER OF DROPPED ROWS ARE COMING FROM?
+        # No, it shouldn't be, because files that get dropped here never get sent
+        # to the ingestor, so their counts never get added to expected_gps_rows
+
         contribution = sum([x[2] for x in fstats])
         if contribution < min_sample_threshold:
             log("Not enough samples from participant %s (%d)"%(iidstr,contribution))
@@ -449,20 +443,13 @@ if __name__ == '__main__':
 
         # The files we're looking for are organized in directories by
         # the unique pairing of interact_id and sdid. 
-        # The directory name is the participant's iid, followed by the 
-        # id of the SD device, so the sdb files for a 
-        # particular participant can appear in multiple folders. 
-        # argsets = []
-        # for pid,dirpath in enumerate(os.listdir(rootdir)):
-        #     if not target_iids or dirpath in target_iids:
-        #         argsets.append( [rootdir,dirpath] )
-
         # So there's no point in trying to ingest by directory, because
         # a single participant's SDBs can be found in multiple
         # directories. What makes more sense is to ingest all the 
         # specific sdb files associated with a particular user.
         participant_files = {}
-        for foldername in os.listdir(rootdir):
+        print("Taking file inventory...")
+        for foldername in tqdm(os.listdir(rootdir)):
             folderpath = os.path.join(rootdir, foldername)
             if os.path.isdir(folderpath): # we have a data folder
                 sdidstr = ''
@@ -478,22 +465,26 @@ if __name__ == '__main__':
                             participant_files[iidstr] = []
                         participant_files[iidstr].append(filepath)
 
+        # Now we have a dictionary with a list of file paths for each
+        # participant
+
         # Before we ingest the files, take a row count from the existing
         # DB tables so that we can count again post-ingest and compare
         # against the number of rows we intended to ingest from each
         # of the SDB files. This will give some measure of confidence
         # as to whether the ingest was successful.
         # In this pre-ingest count, we report both GPS and Accel counts,
-        # despite the higher cost of counting accel rows, so that we
-        # have a rollback point if the ingest crashes.
+        # despite the higher cost of counting accel rows, so we could
+        # conceivably use those record counts to rollback if the ingest
+        # fails.
         baseline_gps_rows = count_db_rows('sd_gps')
         baseline_accel_rows = count_db_rows('sd_accel')
         log("Baseline GPS Count: %d"%baseline_gps_rows)
         log("Baseline Accel Count: %d"%baseline_accel_rows)
 
-        # We now have a dictionary that maps each participant id to
-        # a list of their sdb filepaths.
-        for iidstr in participant_files:
+        # Now ingest all the files associated with each participant
+        print("Ingesting inventoried files...")
+        for iidstr in tqdm(participant_files):
             if participant_files[iidstr]:
                 result = ingest_user_files(iidstr,
                                            participant_files[iidstr])
@@ -505,15 +496,16 @@ if __name__ == '__main__':
         # initial baseline, we only track GPS table rows, as they are 
         # much smaller than the accel tables, so they're much faster to 
         # compute and still provide a reasonable metric of success.
-        log("Baseline GPS Count: %d"%baseline_gps_rows)
-        log("Expected GPS Count: %d"%(baseline_gps_rows+expected_gps_rows))
-        log("Complete GPS Count: %d"%final_gps_rows)
+        log("Baseline GPS Count: %d"%baseline_gps_rows,screen=True)
+        log("Expected GPS Count: %d"%(baseline_gps_rows+expected_gps_rows),screen=True)
+        log("Complete GPS Count: %d"%final_gps_rows, screen=True)
         ingested_gps_rows = final_gps_rows - baseline_gps_rows
-        ingest_rate = 100.0*ingested_gps_rows/float(expected_gps_rows)
+        ingest_rate = 100.0*float(ingested_gps_rows)/float(expected_gps_rows)
         if ingest_rate > 99.5:
-            log("Ingest looks successful with %0.2f%% row retention. Remember, some minor row loss is expected due to timestamp duplication in SDB files."%ingest_rate)
+            log("Ingest looks successful with %0.2f%% row retention."%ingest_rate, screen=True)
+            log("Remember, some minor row loss is expected due to timestamp duplication in SDB files.",screen=True)
         else:
-            log("Row retention of %0.2f%% looks low."%ingest_rate) 
-            log("Minor row loss is expected due to duplicated timestamps in the SDB files, but this seems excessive.")
-            log("But if this was a re-ingest of an uncompleted previous ingest cycle, high row loss is to be expected.")
+            log("Row retention of %0.2f%% looks low."%ingest_rate, screen=True) 
+            log("Minor row loss is expected due to duplicated timestamps in the SDB files, but this seems excessive.", screen=True) 
+            log("But if this was a re-ingest of an uncompleted previous ingest cycle, high row loss is to be expected.", screen=True)
 
