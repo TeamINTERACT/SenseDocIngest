@@ -14,6 +14,9 @@ sections, but to make use of that, we need to run the job wrapped in
 a bash shell that sets up the SLURM settings. Otherwise no additional
 threads or processors will be available in the runtime environment.
 
+NOTE:
+After discussion with ComputeCanada IT, they discourage running this kind of job in parallel because opening and closing lots of smaller files actually degrades performance, given the underlying structures used for the file system.
+
 Usage:
   sensedoc_ingest [options] PATH
   sensedoc_ingest -h | --help | -V | --version
@@ -21,22 +24,34 @@ Usage:
 Options:
     -h            Display this help info
     -L FNAME      Save log to FNAME
+    -D            Detect row leakage
     -i IID        Ingest participant IID only
+    -E            Display runtime environment vars and then quit 
     -v,--verbose  Provide more verbose output
 """
 import os
 import sqlite3
 import datetime
+import psycopg2
 import subprocess as sub
+from tqdm import tqdm
 from docopt import docopt
 from itertools import combinations
 from pprint import pprint
 from concurrent.futures import ThreadPoolExecutor as PoolExecutor
 
+#db_name = 'interact_db'
+db_host = os.environ["SQL_LOCAL_SERVER"]
+db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+db_user = os.environ["SQL_USER"]
+db_name = os.environ["SQL_DB"]
+db_schema = os.environ["SQL_SCHEMA"]
+
 # number of GPS samples a participant must have across all their
 # data files to be included in the database
 min_sample_threshold = 3600 # equates to 1 hour of usable data
-dbname = 'interact_db'
+detect = True
+purge = False
 logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
@@ -50,9 +65,10 @@ def log(msg, prebreak=False, screen=False):
             loghandle.write("\n")
         loghandle.write("%s\n" % msg)
         loghandle.flush()
-    if prebreak:
-        print('')
-    print("LOG: %s" % msg)
+    if screen:
+        if prebreak:
+            print('')
+        print("LOG: %s" % msg)
 
 def mention(str):
     if args['--verbose']:
@@ -167,9 +183,9 @@ def select_usable_files(filelist, iidstr):
         # reject the filelist if the number of samples does not
         # meet the minimum threshold
 
-        # COULD THIS BE WHERE THE HIGH NUMBER OF DROPPED ROWS ARE COMING FROM?
-        # No, it shouldn't be, because files that get dropped here never get sent
-        # to the ingestor, so their counts never get added to expected_gps_rows
+        # COULD THIS BE WHERE THE HIGH NUM OF DROPPED ROWS COMING FROM?
+        # No, be, because files that get dropped here never get sent
+        # to the ingestor, so their counts not added to expected_gps_rows
 
         contribution = sum([x[2] for x in fstats])
         if contribution < min_sample_threshold:
@@ -185,7 +201,7 @@ def select_usable_files(filelist, iidstr):
     log("No usable data files from participant %s." % iidstr)
     return None
 
-def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
+def execute_copy_via_shell(filepath, tablename, selectionsql):
     # On the command line we could run a single command to
     # pull data from the sqlite file with sqlite3 and ingest into the 
     # postgres by piping the output directly to psql.
@@ -232,13 +248,13 @@ def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
     # eliminate illegal chars in tableid
     tableid = tableid.translate({ord(i):None for i in '-./'})
     copycmd = """
-             CREATE TABLE level_0.deleteme{tid} (LIKE level_0.{tn}); 
-             COPY level_0.deleteme{tid} FROM STDIN delimiter '|' CSV;
-             INSERT INTO level_0.{tn}
-                SELECT * FROM level_0.deleteme{tid}
+             CREATE TABLE {sch}.deleteme{tid} (LIKE {sch}.{tn}); 
+             COPY {sch}.deleteme{tid} FROM STDIN delimiter '|' CSV;
+             INSERT INTO {sch}.{tn}
+                SELECT * FROM {sch}.deleteme{tid}
              ON CONFLICT (iid,ts) DO NOTHING;
-             DROP TABLE level_0.deleteme{tid};
-             """.format(tn=tablename,tid=tableid)
+             DROP TABLE {sch}.deleteme{tid};
+             """.format(tn=tablename,tid=tableid,sch=db_schema)
 
     # NOTE: There's still a minor issue here. We tend to want to ingest
     # an entire wave at a time, but if something goes wrong partway 
@@ -254,7 +270,7 @@ def execute_copy_via_shell(filepath, tablename, selectionsql, pid):
 
     cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath,
                                                         selectionsql,
-                                                        dbname,
+                                                        db_name,
                                                         copycmd)
     mention("Command line: %s" % cmdline)
     res = sub.call(cmdline, shell=True)
@@ -342,12 +358,24 @@ def ingest_sdb_file(filepath,iidstr):
         # written to the file, keeping only the latest instance in cases
         # where records share the same timestamp info.
 
+    if detect:
+        # if we're looking for leaks, count rows before ingesting
+        rows_before_ingest = count_db_rows('sd_gps') 
+
     # Now ingest each of the required tables into the DB.
     success = True
-    for i,tbl in enumerate(selectionsql):
+    for tbl in selectionsql:
         success = success and execute_copy_via_shell(filepath, tbl, 
-                                                     selectionsql[tbl], 
-                                                     i)
+                                                     selectionsql[tbl]) 
+    if detect:
+        # then count rows again after ingesting
+        rows_after_ingest = count_db_rows('sd_gps') 
+        rows_ingested = rows_after_ingest - rows_before_ingest
+        rows_expected = gps_file_row_counts[filepath]
+        log("ingested %d vs expected %d = %g loss for '%s'"%(rows_ingested,
+                    rows_expected,
+                    (rows_expected-float(rows_ingested))/rows_expected,
+                    filepath))
     return success
 
 
@@ -377,13 +405,6 @@ def ingest_user_files(iidstr, filepathlist):
 
     return success
 
-import psycopg2
-# from sqlalchemy import create_engine
-db_host = os.environ["SQL_LOCAL_SERVER"]
-db_host_port = int(os.environ["SQL_LOCAL_PORT"])
-db_user = os.environ["SQL_USER"]
-db_name = os.environ["SQL_DB"]
-db_schema = os.environ["SQL_SCHEMA"]
 
 def count_db_rows(tablename):
     """
@@ -407,7 +428,6 @@ def count_db_rows(tablename):
     return count
 
 
-
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
 
@@ -415,6 +435,21 @@ if __name__ == '__main__':
     # of the default
     if args['-L']:
         logfile = args['-L']
+
+    detect = args['-D']
+
+    if args['-E']:
+        print("Command line args:")
+        pprint(args)
+        print("DB_HOST: %s"%db_host)
+        print("DB_HOST_PORT: %s"%db_host_port)
+        print("DB_USER: %s"%db_user)
+        print("DB_NAME: %s"%db_name)
+        print("DB_SCHEMA: %s"%db_schema)
+        print("Log file: %s"%logfile)
+        print("leak detect: %s"%detect)
+        exit()
+
 
     with open(logfile, 'w') as loghandle:
         log("Ingest script was run with following arguments:")
@@ -452,6 +487,7 @@ if __name__ == '__main__':
         for foldername in tqdm(os.listdir(rootdir)):
             folderpath = os.path.join(rootdir, foldername)
             if os.path.isdir(folderpath): # we have a data folder
+                log("Inventory D %s" % folderpath)
                 sdidstr = ''
                 iidstr = foldername
                 # sdb data for some participants split over mult folders
@@ -464,6 +500,8 @@ if __name__ == '__main__':
                         if not iidstr in participant_files:
                             participant_files[iidstr] = []
                         participant_files[iidstr].append(filepath)
+            else:
+                log("Inventory F %s" % folderpath)
 
         # Now we have a dictionary with a list of file paths for each
         # participant
@@ -486,8 +524,11 @@ if __name__ == '__main__':
         print("Ingesting inventoried files...")
         for iidstr in tqdm(participant_files):
             if participant_files[iidstr]:
+                log("Inventory ! %s %s" % (iidstr,participant_files[iidstr]))
                 result = ingest_user_files(iidstr,
                                            participant_files[iidstr])
+            else:
+                log("Inventory ? %s" % iidstr)
 
         # Count final GPS table size
         final_gps_rows = count_db_rows('sd_gps') 

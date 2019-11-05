@@ -1,4 +1,48 @@
-2019-02-24
+2019-09-26
+----------
+    Summary
+    - Cautious ingest scheme w wave rollback - causing temp DB bloat 
+        - cedar has 1TB, hard DB limit (for now)
+        - revised scheme to forgo rollback at wave level
+            - could use PREPARE TRANSACTION, COMMIT/ROLLBACK PREPARED
+            - but this pushes entire state to storage, duplicating bloat
+        - reingested Mtl and Vic
+        - Adoption of Brin-type index would reduce DB size by 50%
+    - 1.1% ingest leakage
+        It's not coming from the null/illegal value filter (app 0.002%)
+        Investigating source of leakage
+        Won't do re-ingest until this is figured out
+    - Devised new Migration step: linkage validation
+        - identified a number of issues with Mtl, Vic, and Sk data
+            - missing files
+            - mislabeled files (wrong iid)
+            - unexpected files
+        - all issues have been resolved
+        - everything will need to be re-ingested again
+    - Vancouver files received and checksum validated, sort of
+        Outer checksums matched, but files were double-zipped
+        Some internal unzips reported checksum mismatch (4)
+        Apparently Vault forces zip downloads, so no workaround
+        When zipped checksum complains, no way to know which file
+        Working my way through raw file validations
+        Directories still need to be refactored (handy script)
+        Migration waiting for linkage validation
+    - DB size cap: 
+        920 GB after Mtl and Vic
+        Short term: restructure DB indices 
+            Btree index appx equal size to tables they index
+                New BRIN index virt. eliminates index size
+                420GB vs 20MB
+                Also faster to ingest
+                Also faster for most common queries on timeseries data
+                Should buy us enough space for Sk and Van
+            Not implementing until Oct 15
+            Will reingest everything once Van is ready
+        Long term:
+            CC is working on expanding storage limit
+            No response yet on whether a diff cluster wld be larger
+
+2019-09-24
 ----------
     We've hit the DB size cap. After ingesting just Montreal and Victoria Wave 1 data, the DB is already at 920 GB, just shy of our 1TB limit. Curiously, 424GB of that size is taken up by the accel table's index. I'm now going to try several different index configurations to see which one gives us the best trade-off between index size and performance.
 

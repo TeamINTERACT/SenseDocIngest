@@ -6,6 +6,8 @@ counting the number of duplicated timestamps.
 
 The current ingest process has reported a seemingly high number of dropped rows for Montreal (1.1%) and I want to see whether that can be attributed to duplicate rows.
 
+Hmm. Duplicates and illegal values account for 0.0024% drop in Victoria and 0.0028% in Montreal. The 1.1% must be coming from some other cause.
+
 Usage:
   duplication_sniffer [options] ROOTPATH
   duplication_sniffer -h | --help | -V | --version
@@ -26,6 +28,7 @@ import datetime
 from docopt import docopt
 from tqdm import tqdm
 
+target_iid = None
 loghandle = None
 logfile = datetime.datetime.now().strftime("duplication_report.log")
 
@@ -153,6 +156,9 @@ if __name__ == '__main__':
     if args['-L']:
         logfile = args['-L']
 
+    if args['-i']:
+        target_iid = args['-i']
+
     root_path = args['ROOTPATH']
 
     count_sdb_files = 0
@@ -175,6 +181,9 @@ if __name__ == '__main__':
             for headdir,dirs,files in os.walk(root_path, followlinks=True):
                 for fname in files:
                     fpath = os.path.join(headdir, fname)
+                    # skip non-target files if target_iid has been given
+                    if target_iid and not target_iid in fpath:
+                        continue
                     if fname.lower().endswith(".sdb"):
                         dups,ills,tot = count_duplicate_timestamps(fpath)
                         log("%d, %d, %s" % (dups, tot, fpath))

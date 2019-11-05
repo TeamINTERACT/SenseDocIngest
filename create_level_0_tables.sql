@@ -1,4 +1,4 @@
-CREATE TABLE IF NOT EXISTS level_0.sd_accel
+CREATE TABLE IF NOT EXISTS sd_accel
 (
     iid bigint NOT NULL,   -- interact_id
     ts timestamp with time zone NOT NULL, -- participant's UTC time, to millisec 
@@ -7,9 +7,9 @@ CREATE TABLE IF NOT EXISTS level_0.sd_accel
     z double precision NOT NULL,
     PRIMARY KEY(iid,ts)
 );
-COMMENT ON TABLE level_0.sd_accel IS 'Contains all the valid accelerometer records extracted from the SenseDoc devices. Granularity = 20ms';
+COMMENT ON TABLE sd_accel IS 'Contains all the valid accelerometer records extracted from the SenseDoc devices. Granularity = 20ms';
 
-CREATE TABLE IF NOT EXISTS level_0.sd_gps
+CREATE TABLE IF NOT EXISTS sd_gps
 (
     iid bigint NOT NULL,  -- interact_id
     ts timestamp with time zone NOT NULL, -- participant's UTC time, to millisec
@@ -29,4 +29,4 @@ CREATE TABLE IF NOT EXISTS level_0.sd_gps
     sat_in_view integer DEFAULT -1, 
     PRIMARY KEY(iid,ts)
 );
-COMMENT ON TABLE level_0.sd_gps IS 'Contains all the valid GPS records extracted from the SenseDoc devices. Granularity = 1s';
+COMMENT ON TABLE sd_gps IS 'Contains all the valid GPS records extracted from the SenseDoc devices. Granularity = 1s';

@@ -4,9 +4,9 @@
 This script compares two directory trees to verify whether they contain
 identical data content, despite having potentially different hierarchies and filenames.
 
-This is done by creating two checksum fingerprint lists: one for all the files
-in each tree. We then compare the two lists to see that they contain identical
-sets of fingerprints.
+This is done by creating two checksum fingerprint lists: one for all 
+the files in each tree. We then compare the two lists to see that they 
+contain identical sets of fingerprints.
 
 Usage:
   verify_refactor [options] ROOTPATH1 ROOTPATH2
