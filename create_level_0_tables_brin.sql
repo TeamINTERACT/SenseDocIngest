@@ -5,8 +5,8 @@ CREATE TABLE IF NOT EXISTS sd_accel
     ts timestamp with time zone NOT NULL, -- participant's UTC time, to millisec 
     x double precision NOT NULL,
     y double precision NOT NULL,
-    z double precision NOT NULL,
-    PRIMARY KEY(iid,ts)
+    z double precision NOT NULL
+    -- PRIMARY KEY(iid,ts)
 );
 -- CREATE INDEX sd_accel_idx ON sd_accel USING BTREE (iid,ts);
 -- Choose one of these
@@ -31,8 +31,8 @@ CREATE TABLE IF NOT EXISTS sd_gps
     pdop real DEFAULT 'NaN',
     hdop real DEFAULT 'NaN',
     vdop real DEFAULT 'NaN',
-    sat_in_view integer DEFAULT -1, 
-    PRIMARY KEY(iid,ts)
+    sat_in_view integer DEFAULT -1
+    -- PRIMARY KEY(iid,ts)
 );
 -- CREATE INDEX sd_gps_idx ON sd_gps USING BTREE (iid,ts);
 CREATE INDEX sd_gps_idx ON sd_gps USING BRIN (iid,ts);

@@ -1,3 +1,4 @@
+SET SCHEMA 'level_0';
 CREATE TABLE IF NOT EXISTS sd_accel
 (
     iid bigint NOT NULL,   -- interact_id
