@@ -253,15 +253,8 @@ def execute_copy_via_shell(filepath, tablename, selectionsql):
     that timestamp are the values associated with the last record
     recorded, not the first.
 
-    So once the data has been loaded into the raw PSQL table, we will
-    do one simple transformation to eliminate records with duplicate
-    timestamps. We'll do this by copying the table to a new table
-    and using the ON CONFLICT DO NOTHING clause. We have to do it this
-    way because the main table uses a brin index and has no 
-    uniqueness constraint. So to get around that, our second temp table
-    has a btree index. (We can't just put a btree idx on the main table 
-    because they're HUGE and put us over our file size limit. So doing it
-    on a per-user basis keeps that index from devouring the universe.)
+    So during the export from the sqlite sdb file, we add a uniqueness
+    clause to be sure that we only take the latest copy of any records with duplicated timestamps.
     """
     
     # Create a suffix that will be appended to the temporary loading
@@ -279,25 +272,16 @@ def execute_copy_via_shell(filepath, tablename, selectionsql):
     ingestcmd = """
              SET SCHEMA '{sch}';
              CREATE TABLE {rawtbl} (LIKE {maintbl}); 
-             CREATE TABLE {nodupstbl} (LIKE {maintbl}); 
-             ALTER TABLE {nodupstbl} ADD CONSTRAINT {idx} UNIQUE (iid,ts);
-
-             -- load the raw table
+             -- load the raw table from the sqlite stream
              COPY {rawtbl} FROM STDIN delimiter '|' CSV;
-
-             -- copy the raw table to the nodups tbl and drop duplicate records
-             INSERT INTO {nodupstbl}
-                SELECT * FROM {rawtbl}
-             ON CONFLICT (iid,ts) DO NOTHING;
              """.format(maintbl=tablename, rawtbl=raw_tablename, 
                         nodupstbl=nodups_tablename,
                         idx=idx_name, sch=db_schema)
     absorbcmd = """
              SET SCHEMA '{sch}';
              INSERT INTO {maintbl}
-                SELECT * FROM {nodupstbl};
+                SELECT * FROM {rawtbl};
              DROP TABLE {rawtbl};
-             DROP TABLE {nodupstbl};
              """.format(maintbl=tablename, rawtbl=raw_tablename, 
                         nodupstbl=nodups_tablename,
                         idx=idx_name, sch=db_schema)
@@ -315,8 +299,10 @@ def execute_copy_via_shell(filepath, tablename, selectionsql):
     # by trying to be clever about skipping redundant ingests.
 
     # Load the raw data into a temp table
-    cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath, selectionsql,
-                                                        db_name, ingestcmd)
+    cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath, 
+                                                        selectionsql,
+                                                        db_name, 
+                                                        ingestcmd)
     mention("Load command line: %s" % cmdline)
     res = sub.call(cmdline, shell=True)
     if res:
@@ -333,16 +319,15 @@ def execute_copy_via_shell(filepath, tablename, selectionsql):
         log("Ingesting file %s failed hygiene tests with return code: %s"%(filepath,res))
         return False
 
-    # If the hygiene scripts succeeded, transfer the temp table into the main
-    if True:
-        cmdline = 'psql %s -q -c "%s"' % (db_name, absorbcmd)
-        mention("Absorb command line: %s" % cmdline)
-        res = sub.call(cmdline, shell=True)
-        if res:
-            # If any table fails, the ingest for that participant should be 
-            # reported as unsuccessful.
-            log("Absorbing file %s failed with return code: %s"%(filepath,res))
-            return False
+    # If the hygiene scripts succeeded, transfer temp table into main
+    cmdline = 'psql %s -q -c "%s"' % (db_name, absorbcmd)
+    mention("Absorb command line: %s" % cmdline)
+    res = sub.call(cmdline, shell=True)
+    if res:
+        # If any table fails, the ingest for that participant should 
+        # be reported as unsuccessful.
+        log("Absorbing file %s failed with return code: %s"%(filepath,res))
+        return False
 
     # OTHERWISE, SHOULDN'T WE DROP THE TEMP TABLE?
 
@@ -391,6 +376,8 @@ def ingest_sdb_file(filepath,iidstr):
                        WHERE x is not null
                          AND y is not null
                          AND z is not null
+                         -- this clause filters out duplicate times
+                         AND rowid in (SELECT max(rowid) FROM accel GROUP BY ts)
                        ORDER BY ts, ROWID DESC;
                        """.format(iidstr, refDate)
     selectionsql['sd_gps'] = """
@@ -419,6 +406,8 @@ def ingest_sdb_file(filepath,iidstr):
                 AND (speed is NULL or speed BETWEEN 0 and 1000)
                 AND (sat_used is NULL or sat_used BETWEEN 0 and 50)
                 AND (sat_in_view is NULL or sat_in_view BETWEEN 0 and 50)
+                -- this clause filters out duplicate timestamps 
+                AND (rowid in (SELECT max(rowid) FROM gps GROUP BY ts))
             ORDER BY ts, ROWID DESC;
         """.format(iidstr, refDate)
                 #-- following fields either null or in legal range
