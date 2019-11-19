@@ -229,7 +229,13 @@ def run_data_hygiene_scripts(tablename, scriptdir):
     but has determined that the table cannot be ingested. (Which means we can
     stop running additional scripts against it.)
     """
-    mention("Skipping the hygiene scripts for now.")
+    print("Not executing the hygiene scripts yet.")
+    # for each script in the script directory
+    for root,dirs,files in os.walk(scriptdir):
+        # prep the parameters to the script
+        # run the script
+        for script in sorted(files):
+            print("Let's run script: %s" % os.path.join(root,script))
     return(0) # return successful completion
 
 def execute_copy_via_shell(filepath, tablename, selectionsql):
@@ -281,7 +287,7 @@ def execute_copy_via_shell(filepath, tablename, selectionsql):
              SET SCHEMA '{sch}';
              INSERT INTO {maintbl}
                 SELECT * FROM {rawtbl};
-             DROP TABLE {rawtbl};
+             -- DROP TABLE {rawtbl};
              """.format(maintbl=tablename, rawtbl=raw_tablename, 
                         nodupstbl=nodups_tablename,
                         idx=idx_name, sch=db_schema)

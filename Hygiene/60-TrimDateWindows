@@ -1,0 +1,196 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+60-TrimDateWindows is part of the Interact database ingest
+hygiene system. This script will examine a particular data table
+that contains telemetry data for a specific participant IID. The
+script ensures that there are no records in the table that fall
+outside the known period of activity during which the
+participant wore the collection device.  
+
+TABLENAME must be a fully qualified schema.tablename prefix for
+the accel and gps tables. For example: if the tables are called
+temp_accel and temp_gps, in the indata schema, the correct prefix 
+would be: indata.temp_ 
+
+Exits with return code 0 on successful completion.
+Exits with return code 1 on error condition.
+Exits with return code 2 if unknown out-of-bounds records were found.
+
+Usage:
+  60-TrimDateWindows [options] IID CITYNUM WAVENUM TABLEPREFIX
+  60-TrimDateWindows -h | --help | -V | --version
+
+Options:
+  -e              Execute mods. Otherwise, describe but do not execute.
+  -v | --verbose  Provide verbose output.  
+"""
+import os
+import psycopg2
+from docopt import docopt
+
+# def debug(varname):
+#     print(varname, '=', repr(eval(varname)))
+
+db_host = os.environ["SQL_LOCAL_SERVER"]
+db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+db_user = os.environ["SQL_USER"]
+db_name = os.environ["SQL_DB"]
+db_schema = os.environ["SQL_SCHEMA"]
+
+# debug('db_host')
+# debug('db_host_port')
+# debug('db_user')
+# debug('db_name')
+# debug('db_schema')
+
+
+EXIT_NOTHING_UNUSUAL = 0
+EXIT_UNEXPECTED_ERROR = 1
+EXIT_TABLE_MISSING = 2
+
+# These are the problematic records that we have found during 
+# previous ingest cycles, investigated, and found to be completely
+# extraneous, so they can be dropped with impugnity.
+known_records_being_dropped = [
+    {'city':1, 'wave':1, 'stream':2, 'iid':101002187,
+        'table':'gps',
+        'where':"ts::date >= '2012-01-01' AND ts::date <= '2012-01-02'"},
+    {'city':1, 'wave':1, 'stream':2, 'iid':101002187,
+        'table':'accel',
+        'where':"ts::date >= '2012-01-01' AND ts::date <= '2012-01-02'"},
+    ]
+
+tables_to_test = ['accel', 'gps']
+
+execute_operations = False
+
+
+def mention(str):
+    if args['--verbose']:
+        print(str)
+
+def err(str):
+    print("ERR: %s"%str)
+
+
+def query_db(cursor, sql):
+    """Report SQL cmd being executed and then execute, regardless of
+       execution filter, because this query is read-only."""
+    if not execute_operations:
+        mention("Running benign query: %s" % sql.strip())
+    res = cursor.execute(sql)
+    row = cursor.fetchone()
+    # if row:
+    #     print('Query returned:')
+    #     print(row)
+    # else:
+    #     print('Query returned: None')
+    return row
+
+
+def modify_db(cursor, sql):
+    """Report SQL cmd being executed but only execute it if 
+       specifically authorized on command line, because this query 
+       modifies the DB."""
+    res = None
+    if execute_operations:
+        mention("Executing volatile query: %s" % sql.strip())
+        res = cursor.execute(sql)
+    else:
+        mention("Suppressing volatile query: %s" % sql.strip())
+    return res
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+    mention(args)
+
+    iid = int(args['IID'])
+    city = int(args['CITYNUM'])
+    wave = int(args['WAVENUM'])
+    tableprefix = args['TABLEPREFIX']
+    execute_operations = args['-e']
+
+    # These are specifically looking at SenseDoc files, so the 
+    # stream can only be 2, but I'll set it as a parameter here
+    # just in case this remedy becomes useful for other streams
+    # later, like maybe Ethica
+    stream=2
+
+    # get a connection to the DB
+    with psycopg2.connect(user=db_user,
+                          host=db_host,
+                          port=db_host_port,
+                          database=db_name) as conn:
+        cursor = conn.cursor()
+
+        # for each table being examined
+        for tabletype in tables_to_test:
+            target_table = "%s%s" % (tableprefix, tabletype)
+            # if table still exists (possibly dropped by prev remedy)
+            sql = """
+                    SELECT EXISTS (
+                            SELECT 1 FROM pg_tables
+                                    WHERE schemaname='{snm}'
+                                    AND tablename='{tnm}'
+                            );
+                    """.format(snm=db_schema, tnm=target_table)
+            row = query_db(cursor, sql)
+            if row and row[0] == True:
+                # get user wear dates from participant info table
+                print("CURRENTLY TESTING AGAINST STUDY DATES, NOT USER DATES!!!")
+                # change SQL to check user-specific wear data windows
+                sql="""
+                    SELECT start_date, collected_date AS end_date
+                    FROM portal_dev.pipeline_status 
+                    WHERE wave={wave} AND city={city} AND stream={stream};
+                    """.format(wave=wave,city=city,stream=stream)
+                row = query_db(cursor, sql)
+                start_wear = row[0]
+                end_wear = row[1]
+                # if there are any known records to be dropped 
+                for droprec in known_records_being_dropped:
+                    if (droprec['city']==city and 
+                        droprec['wave']==wave and
+                        droprec['stream']==stream and 
+                        droprec['table'] == tabletype):
+                        # drop them
+                        sql = """
+                            DELETE FROM {sch}.{tbl} WHERE {where}; 
+                            """.format(tbl=target_table,
+                                       sch=db_schema,
+                                        where=droprec['where'])
+                        res = modify_db(cursor, sql)
+                # if any remaining records outside the wear window
+                sql="""
+                    SELECT min(ts) as start, max(ts) as end, count(1) as num
+                    FROM {scm}.{tbl}
+                    WHERE ts < '{start}' OR ts > '{end}';
+                    """.format(tbl=target_table,
+                            scm=db_schema,
+                            start=start_wear,end=end_wear)
+                row = query_db(cursor, sql)
+                if row: 
+                    if row[2] > 0:
+                        # report first/last ts and num records
+                        err("Table %s contains %d out-of-bounds timestamps."%(target_table,row[2]))
+                        err("      Expected wear dates: %s to %s"%(start_wear,end_wear))
+                        err("      Dates found: %s to %s"%(row[0],row[1]))
+                        # Now we'll pass a failure return code back to the 
+                        # calling script, but abort the table without 
+                        # dropping it or altering it further. That way
+                        # the caller will know not to invoke any further
+                        # hygiene scripts on this table, but the data will
+                        # be left in the DB for the operator to examine,
+                        # which is a lot handier than forcing them to 
+                        # reingest the file.
+                        exit(EXIT_UNEXPECTED_ERROR)
+                    # if row[2] == 0 then everything worked fine
+                else:
+                    mention("Query returned NULL'")
+            else:
+                err("Expected DB table %s%s missing."%(tableprefix,tabletype))
+                exit(EXIT_TABLE_MISSING)
+    # the connection has closed, so we can now return normal opcode
+    exit(EXIT_NOTHING_UNUSUAL)
