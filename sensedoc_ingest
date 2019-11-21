@@ -62,7 +62,7 @@ hygiene_dir = ''
 min_sample_threshold = 3600 # equates to 1 hour of usable data
 detect = True
 purge = False
-logfile = datetime.datetime.now().strftime("ingest_%Y%m%d-%H%M%S.log")
+logfile = datetime.datetime.now().strftime("tmp_ingest_%Y%m%d-%H%M%S.log")
 loghandle = None
 
 # a stat we can track to give confidence that the ingest worked
@@ -319,10 +319,14 @@ def execute_copy_via_shell(filepath, city,wave,stream,iid,
              SET SCHEMA '{sch}';
              INSERT INTO {maintbl}
                 SELECT * FROM {rawtbl};
-             -- DROP TABLE {rawtbl};
+             DROP TABLE {rawtbl};
              """.format(maintbl=tablename, rawtbl=raw_tablename, 
                         # nodupstbl=nodups_tablename,
                         idx=idx_name, sch=db_schema)
+             # for debugging purposes, the rawtable can be kept in DB
+             # by prefixing -- to the DROP TABLE line
+             # But be cautious: it doubles the disk footprint of the
+             # ingested data.
 
     # NOTE: There's still a minor issue here. We tend to want to ingest
     # an entire wave at a time, but if something goes wrong partway 

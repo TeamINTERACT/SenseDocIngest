@@ -176,6 +176,7 @@ if __name__ == '__main__':
                     err("Table %s contains %d out-of-bounds timestamps."%(target_table,row[2]))
                     err("      Expected wear dates: %s to %s"%(start_wear,end_wear))
                     err("      Dates found: %s to %s"%(row[0],row[1]))
+                    err("      Table preserved, data not incorporated.")
                     # Now we'll pass a failure return code back to the 
                     # calling script, but abort the table without 
                     # dropping it or altering it further. That way
@@ -187,7 +188,8 @@ if __name__ == '__main__':
                     exit(EXIT_UNEXPECTED_ERROR)
                 # if row[2] == 0 then everything worked fine
             else:
-                mention("Query returned NULL'")
+                # mention("Query returned NULL'")
+                log("Query returned NULL'")
         else:
             err("Expected DB table %s missing."%(target_table))
             exit(EXIT_TABLE_MISSING)
