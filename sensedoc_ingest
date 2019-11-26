@@ -214,7 +214,7 @@ def select_usable_files(filelist, iidstr):
 def indent_block(instr):
     return '\n'.join(['  '+x for x in instr.strip().split('\n')])
 
-def run_data_hygiene_scripts(city,wave,stream,iid,tablename,scriptdir):
+def run_data_hygiene_scripts(city,wave,stream,iid,tablename,serial,scriptdir):
     """
     The raw data being ingested is often messy. It contains
     occasional duplicate records, records with illegal values,
@@ -255,7 +255,7 @@ def run_data_hygiene_scripts(city,wave,stream,iid,tablename,scriptdir):
                     scriptpath = os.path.abspath(os.path.join(root,script))
                     cmd = [scriptpath, iid, 
                            str(city), str(wave), 
-                           tablename, '-e']
+                           tablename, serial, '-e']
                     # pprint(cmd)
                     cp = sub.run(cmd, stdout=sub.PIPE)
                     success_code_all = max([success_code_all,
@@ -295,11 +295,26 @@ def execute_copy_via_shell(filepath, city,wave,stream,iid,
     clause to be sure that we only take the latest copy of any records with duplicated timestamps.
     """
     
-    # Create a suffix that will be appended to the temporary loading
-    # tablename. This way, if we have multiple threads loading files,
-    # they'll be stuffing distinct ingest tables and we can roll one
-    # back cleanly on failure without compromising the others.
-    tableid = '_%s_%s' % (filepath[-20:],tablename)
+    # Create an identifier to append to the temporary loading
+    # tablename. This way, if a table doesn't pass verification, we
+    # can leave it in place for forensic investigation and subsequent
+    # file ingests will not try to overwrite it.
+    tail = ''
+    serial = ''
+    basename = os.path.basename(filepath)
+    serialpat = "SD(?P<num>\d*)fw(?P<rev>\d*)_(?P<tail>.*)\.sdb"
+    m = re.match(serialpat, basename)
+    if m:
+        if not m.group('num') or not m.group('rev'):
+            log("Problem getting serial from %s" % basename)
+        serial = "%s-%s" % (m.group('num'), m.group('rev'))
+        tail = m.group('tail')
+    # some users have multiple sdb files that only differ
+    # toward the end of their filename. Add that as well
+    # to ensure unique temp table names
+    if not tail:
+        log("SDB tail empty. Wassup with that?")
+    tableid = '_%s_%s_%s_%s' % (iid,serial,tail,tablename)
 
     # eliminate illegal chars in tableid
     tableid = tableid.translate({ord(i):None for i in '-./'})
@@ -355,7 +370,7 @@ def execute_copy_via_shell(filepath, city,wave,stream,iid,
 
     # Run the hygiene scripts on the temp table
     res = run_data_hygiene_scripts(city,wave,stream,iid,
-                                   raw_tablename, hygiene_dir)
+                                   raw_tablename, serial, hygiene_dir)
     if res:
         # If hygiene fails, the ingest for that participant should be 
         # reported as unsuccessful.

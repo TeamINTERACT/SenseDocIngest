@@ -16,7 +16,7 @@ Exits with return code 1 on error condition.
 Exits with return code 2 if unknown out-of-bounds records were found.
 
 Usage:
-  60-TrimDateWindows [options] IID CITYNUM WAVENUM TARGETTABLE
+  60-TrimDateWindows [options] IID CITYNUM WAVENUM TARGETTABLE DEVICESERIAL
   60-TrimDateWindows -h | --help | -V | --version
 
 Options:
@@ -103,6 +103,7 @@ if __name__ == '__main__':
     city = int(args['CITYNUM'])
     wave = int(args['WAVENUM'])
     target_table = args['TARGETTABLE']
+    serial = args['DEVICESERIAL']
     execute_operations = args['-e']
 
     # These are specifically looking at SenseDoc files, so the 
@@ -141,14 +142,14 @@ if __name__ == '__main__':
             # get user wear dates from participant info table
             print("CURRENTLY TESTING AGAINST STUDY DATES, NOT USER DATES!!!")
             # change SQL to check user-specific wear data windows
-            sql="""
-                SELECT start_date, collected_date AS end_date
-                FROM portal_dev.pipeline_status 
-                WHERE wave={wave} AND city={city} AND stream={stream};
-                """.format(wave=wave,city=city,stream=stream)
-            row = query_db(cursor, sql)
-            start_wear = row[0]
-            end_wear = row[1]
+            # sql="""
+            #     SELECT start_date, collected_date AS end_date
+            #     FROM portal_dev.pipeline_status 
+            #     WHERE wave={wave} AND city={city} AND stream={stream};
+            #     """.format(wave=wave,city=city,stream=stream)
+            # row = query_db(cursor, sql)
+            # start_wear = row[0]
+            # end_wear = row[1]
             # if there are any known records to be dropped 
             for droprec in known_records_being_dropped:
                 if (droprec['city']==city and 
@@ -163,20 +164,44 @@ if __name__ == '__main__':
                                     where=droprec['where'])
                     res = modify_db(cursor, sql)
             # if any remaining records outside the wear window
-            sql="""
-                SELECT min(ts) as start, max(ts) as end, count(1) as num
-                FROM {tbl}
-                WHERE ts < '{start}' OR ts > '{end}';
-                """.format(tbl=target_table,
-                        start=start_wear,end=end_wear)
+            # sql="""
+            #     SELECT min(ts) as start, max(ts) as end, count(1) as num
+            #     FROM {tbl}
+            #     WHERE ts < '{start}' OR ts > '{end}';
+            #     """.format(tbl=target_table,
+            #             start=start_wear,end=end_wear)
+            # Count number of records where timestamps outside window
+            # of known wear dates for that participant.
+            sql = """
+                SELECT  t.iid, 
+                        min(ts::date) as first, 
+                        max(ts::date) as last, 
+                        min(l.started_wearing) as window_start,
+                        min(l.stopped_wearing) as window_stop,
+                        count(1) as num 
+                FROM {tbl} t LEFT JOIN portal_dev.sensedoc_assignments l 
+                        ON t.iid = l.interact_id 
+                WHERE 
+                    l.sensedoc_serial = '{serial}'
+                    -- l.sensedoc_id = 'IPY14R'
+                    AND l.city_id = 1
+                    AND l.wave_id = 1
+                    AND (t.ts < l.started_wearing::date
+                        -- protocol assumes that declared final day of 
+                        -- wearing includes any data up to 3am of 
+                        -- the following day.
+                        OR t.ts > l.stopped_wearing::date + INTERVAL '27 hours')
+                GROUP BY t.iid;
+            """.format(tbl=target_table,serial=serial)
             row = query_db(cursor, sql)
             if row: 
-                if row[2] > 0:
+                if row[5] > 0:
                     # report first/last ts and num records
-                    err("Table %s contains %d out-of-bounds timestamps."%(target_table,row[2]))
-                    err("      Expected wear dates: %s to %s"%(start_wear,end_wear))
-                    err("      Dates found: %s to %s"%(row[0],row[1]))
-                    err("      Table preserved, data not incorporated.")
+                    err("Problem with data for participant: %s"%iid)
+                    err("   Table %s contains %d out-of-bounds timestamps."%(target_table,row[5]))
+                    err("   Expected wear dates: %s to %s"%(row[3],row[4]))
+                    err("   Date range found: %s to %s"%(row[1],row[2]))
+                    err("   Table preserved, data not incorporated.")
                     # Now we'll pass a failure return code back to the 
                     # calling script, but abort the table without 
                     # dropping it or altering it further. That way
@@ -189,7 +214,9 @@ if __name__ == '__main__':
                 # if row[2] == 0 then everything worked fine
             else:
                 # mention("Query returned NULL'")
-                log("Query returned NULL'")
+                err("Query returned NULL'")
+                err("SQL: %s"%sql)
+                exit(EXIT_UNEXPECTED_ERROR)
         else:
             err("Expected DB table %s missing."%(target_table))
             exit(EXIT_TABLE_MISSING)
