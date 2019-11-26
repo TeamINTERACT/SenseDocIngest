@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Load entries from sd_days_merged.csv into the sensedoc_assignments table.
+
+Usage:
+  load_sdlinkage [options] INFILE CITYID WAVEID
+  load_sdlinkage -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+import csv
+import psycopg2
+import dateparser
+from docopt import docopt
+
+def err(str):
+    print("ERR: %s"%str)
+
+args = docopt(__doc__, version='0.1.1')
+fname = args['INFILE']
+wid = int(args['WAVEID'])
+cid = int(args['CITYID'])
+
+try:
+    #db_name = 'interact_db'
+    db_host = os.environ["SQL_LOCAL_SERVER"]
+    db_host_port = int(os.environ["SQL_LOCAL_PORT"])
+    db_user = os.environ["SQL_USER"]
+    db_name = os.environ["SQL_DB"]
+    db_schema = os.environ["SQL_SCHEMA"]
+except KeyError as err:
+    print("A required runtime environment variable was not found.")
+    print(err)
+    print("Have you set up the run-time secrets?")
+    exit(1)
+
+
+"""
+The Postgres table is structured as:
+    create table sensedoc_assignments (
+        id SMALLSERIAL,
+        interact_id integer not null,
+        sensedoc_id text not null,
+        city_id integer not null,
+        wave_id integer not null,
+        started_wearing char(10),
+        stopped_wearing char(10),
+        notes text,
+        Primary Key(id)
+    );
+"""
+
+"""
+The CSV file is structured as:
+    sensedoc_ID, serial, start, end, Notes, interact_id, gps_id, year, start_recode, end_recode
+"""
+
+insert_sql = """
+    INSERT INTO portal_dev.sensedoc_assignments 
+            (interact_id, sensedoc_serial, sensedoc_id, 
+            city_id, wave_id, 
+            started_wearing, stopped_wearing, notes)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s);
+    """
+
+clean = True
+
+with psycopg2.connect(user=db_user,
+                      host=db_host,
+                      port=db_host_port,
+                      database=db_name) as conn:
+    c = conn.cursor()
+    with open(fname, 'r') as fh:
+        for i,row in enumerate(csv.DictReader(fh)):
+            iid = row['interact_id']
+            sid = row['sensedoc_ID']
+            serial = row['serial']
+            notes = row['Notes']
+
+            if '/' in serial:
+                err("Record for user %s contains multiple serial values (%s)."%(iid,serial)) 
+                if clean:
+                    err("This practice no longer supported. Each device needs distinct wear date window in order to filter out extraneous telemetry.")
+                clean = False
+                continue
+
+            if iid == "NA":
+                iid = 0
+            if notes == "NA":
+                notes = ''
+
+            # Dates in the CSV file are entered inconsistently,
+            # so I'm hoping a more flexible date parser will catch
+            # them all, rather than having to hand-edit the incoming
+            # file to make them consistent.
+            start_dt = dateparser.parse(row['start_recode'])
+            stop_dt = dateparser.parse(row['end_recode'])
+            start = start_dt.strftime("%Y-%m-%d")
+            stop = stop_dt.strftime("%Y-%m-%d")
+
+            c.execute(insert_sql, (iid, serial, sid, cid, wid, 
+                                    start, stop, notes))
+        if not clean:
+            conn.rollback()
+
+if clean:
+    print("File ingested successfully.")
+else:
+    print("Some records malformed. Ingest not accepted.")

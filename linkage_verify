@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+This script verifies that an archived set of city/wave data folders
+have the expected participant folders inside.
+
+The expected values are computed from the coordinator's supplied 
+linkage file, which lists the SDID values assigned to each participant
+IID.
+
+By reading the assignments from the CSV, we can construct the
+expected directory names and then look for them in the target directory.
+They'll be in the form: {IID}_{SDID}
+
+Any folders not found are reported in the log file.
+
+We can also do the reverse: look at all the directories in the folder
+and report on any that do not match an IID_SDID pair. This will help
+us identify cases where data is mislabeled, rather than actually missing.
+
+Usage:
+  linkage_verify [options] CSVFILE ROOTPATH
+  linkage_verify -h | --help | -V | --version
+
+Options:
+    -h            Display this help info
+    -L FNAME      Save log to FNAME
+    -v,--verbose  Provide more verbose output
+"""
+
+import os
+import csv
+import datetime
+from docopt import docopt
+from tqdm import tqdm
+
+loghandle = None
+logfile = datetime.datetime.now().strftime("linkage_verify_%Y%m%d-%H%M%S.log")
+
+def log(msg, prebreak=False, screen=False):
+    if loghandle:
+        if prebreak:
+            loghandle.write("\n")
+        loghandle.write("%s\n" % msg)
+        loghandle.flush()
+    if screen:
+        if prebreak:
+            print('')
+        print("LOG: %s" % msg)
+
+
+if __name__ == '__main__':
+    args = docopt(__doc__, version='0.1.1')
+
+    # if user has specified a log filename, use that instead 
+    # of the default
+    if args['-L']:
+        logfile = args['-L']
+
+    linkage_filename = args['CSVFILE']
+    root_dir = args['ROOTPATH']
+
+    expected_dirs = []
+    ignoring_dirs = []
+    with open(logfile, 'w') as loghandle:
+        # CSV file has these column headers
+        # MONTREAL WAVE 1 HEADER
+        #    INTERACT ID;uid;Ethica truth;SD number;SD start ;SD end;
+        #    Sd number 2 ;SD 2 start ;SD 2 end;Dropout
+        # VICTORIA WAVE 1 HEADER
+        #    INTERACT ID,treksoft_id,Sensedoc participant ID,
+        #    Sensedoc ID,Dates worn,Ethica ID,,,,,,Notes
+        with open(linkage_filename,'r',encoding='ISO-8859-1') as fcsv:
+            # sdpat = '^(?P<sdid>\d+)-(?P<fw>\d+)'
+            reader = csv.DictReader(fcsv,delimiter=',')
+            # shown = False
+            for rownum,row in enumerate(list(reader)):
+                iid = row['interact_id']
+                if iid: 
+                    # sdids = row['Sensedoc ID']
+                    sdids = row['serial']
+                    if '/' in sdids:
+                        log("Participant %s has multiple serial values (%s) in one record."%(iid,sdids))
+                        log("WARNING: Validation will continue, but linkage file cannot be ingested until this entry has been split into multiple rows.")
+
+                    for sdfw in sdids.split('/'):
+                        sdid,dum,fw = sdfw.strip().partition('-')
+                        if sdid.lower() == 'na':
+                            pass
+                        elif all(x in '0123456789' for x in sdid):
+                            sdid = str(int(sdid))
+                            if row['data_disposition'] == 'ingest':
+                                expected_dirs.append("%s_%s"%(iid,sdid))
+                            elif row['data_disposition'] == 'ignore':
+                                ignoring_dirs.append("%s_%s"%(iid,sdid))
+                                log("Ignoring folder for %s_%s"%(iid,sdid))
+                        else:
+                            log("Participant %s has illegal SD_ID: %s"%(iid,sdid))
+                else:
+                    log("CSV row #%d has no iid"%rownum)
+
+        log("Expecting %d directories."%len(expected_dirs))
+        # print('\n'.join(expected_dirs))
+
+        count_found_dirs = 0
+        count_unfound_dirs = 0
+        for d in expected_dirs:
+            path = os.path.join(root_dir, d)
+            if os.path.isdir(path):
+                count_found_dirs += 1
+            else:
+                log("UNABLE TO FIND DIRECTORY: '%s'" % path)
+                count_unfound_dirs += 1
+        # now look for unexpected directories
+        count_unexpected_dirs = 0
+        for child in os.listdir(root_dir):
+            if not child in expected_dirs and not child in ignoring_dirs:
+                for childf in os.listdir(os.path.join(root_dir,child)):
+                    if childf.endswith('.sdb'):
+                        log("DIRECTORY IS UNEXPECTED: '%s'" % child)
+                        count_unexpected_dirs += 1
+                        break
+
+        log("Found %d of the expected directories." % count_found_dirs, screen=True)
+        log("%d of the expected directories are missing." % count_unfound_dirs, screen=True)
+        log("Found %d unexpected directories." % count_unexpected_dirs, screen=True)
+
+
+# Known problems that we can safely ignore
+# Expecting 163 directories.
+# UNABLE TO FIND DIRECTORY: '/home/jeffs/projects/def-dfuller/interact/permanent_archive/Victoria/Wave1/SenseDoc/101158091_23'
+    # DEVICE damaged, no data extracted for this pairing
+# UNABLE TO FIND DIRECTORY: '/home/jeffs/projects/def-dfuller/interact/permanent_archive/Victoria/Wave1/SenseDoc/101891218_111'
+    # DEVICE FAILED: No data extracted for this pairing
+# DIRECTORY IS UNEXPECTED: '101996732_147'
+    # This user has data folders for device 60 and 147
+    # Both data folders have plenty of data
+    # Will need to investigate why script is claiming no data found
+    # It is missing from the linkage file
+    # He wore 147 from Sep 19 - 24
+    # He wore  60 from Sep 11-16
+# DIRECTORY IS UNEXPECTED: '101962906_111'
+    # File contains about 2.5 hrs of data from Oct 11, 2017
+    # Karen advises that he switched to Ethica and that this
+    # data file should be ignored and/or filtered out.
+# Found 161 of the expected directories.
+# 2 of the expected directories are missing.
+# Found 2 unexpected directories.
