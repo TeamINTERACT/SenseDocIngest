@@ -140,16 +140,6 @@ if __name__ == '__main__':
         row = query_db(cursor, sql)
         if row and row[0] == True:
             # get user wear dates from participant info table
-            print("CURRENTLY TESTING AGAINST STUDY DATES, NOT USER DATES!!!")
-            # change SQL to check user-specific wear data windows
-            # sql="""
-            #     SELECT start_date, collected_date AS end_date
-            #     FROM portal_dev.pipeline_status 
-            #     WHERE wave={wave} AND city={city} AND stream={stream};
-            #     """.format(wave=wave,city=city,stream=stream)
-            # row = query_db(cursor, sql)
-            # start_wear = row[0]
-            # end_wear = row[1]
             # if there are any known records to be dropped 
             for droprec in known_records_being_dropped:
                 if (droprec['city']==city and 
@@ -163,13 +153,6 @@ if __name__ == '__main__':
                         """.format(tbl=target_table,
                                     where=droprec['where'])
                     res = modify_db(cursor, sql)
-            # if any remaining records outside the wear window
-            # sql="""
-            #     SELECT min(ts) as start, max(ts) as end, count(1) as num
-            #     FROM {tbl}
-            #     WHERE ts < '{start}' OR ts > '{end}';
-            #     """.format(tbl=target_table,
-            #             start=start_wear,end=end_wear)
             # Count number of records where timestamps outside window
             # of known wear dates for that participant.
             sql = """
