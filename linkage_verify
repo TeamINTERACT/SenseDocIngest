@@ -121,8 +121,8 @@ if __name__ == '__main__':
                         count_unexpected_dirs += 1
                         break
 
-        log("Found %d of the expected directories." % count_found_dirs, screen=True)
-        log("%d of the expected directories are missing." % count_unfound_dirs, screen=True)
+        log("Found %d of the %d expected directories." % (count_found_dirs,len(expected_dirs)), screen=True)
+        log("%d are missing." % count_unfound_dirs, screen=True)
         log("Found %d unexpected directories." % count_unexpected_dirs, screen=True)
 
 

@@ -269,7 +269,9 @@ def run_data_hygiene_scripts(city,wave,stream,iid,tablename,serial,scriptdir):
                     mention("%s is not a script file."%script)
     return(success_code_all) # return successful completion
 
-def execute_copy_via_shell(filepath, city,wave,stream,iid, 
+def execute_copy_via_shell(filepath, city, wave, stream, iid, 
+                           serial, tableid, 
+                           wear_start, wear_end,
                            tablename, selectionsql):
     """
     On the command line we could run a single command to
@@ -291,57 +293,61 @@ def execute_copy_via_shell(filepath, city,wave,stream,iid,
     that timestamp are the values associated with the last record
     recorded, not the first.
 
-    So during the export from the sqlite sdb file, we add a uniqueness
-    clause to be sure that we only take the latest copy of any records with duplicated timestamps.
+    To drop those redundant timestamps, we have to wait until after
+    we've ingested the file, because the /COPY command does not 
+    permit ON CONFLICT or DISTINCT clauses.
+
+    Furthermore, we can't use ON CONFLICT to drop dups in the main
+    table because the main uses a brin index which can't test for
+    uniqueness.
+
+    So we load the entire SDB file into a temporary table.
+    Then we copy to a second temp table that has a btree index.
+    At the same time, we drop any records outside the wear window.
+    Then we finally absorb that clean incoming table into the main table. 
     """
     
-    # Create an identifier to append to the temporary loading
-    # tablename. This way, if a table doesn't pass verification, we
-    # can leave it in place for forensic investigation and subsequent
-    # file ingests will not try to overwrite it.
-    tail = ''
-    serial = ''
-    basename = os.path.basename(filepath)
-    serialpat = "SD(?P<num>\d*)fw(?P<rev>\d*)_(?P<tail>.*)\.sdb"
-    m = re.match(serialpat, basename)
-    if m:
-        if not m.group('num') or not m.group('rev'):
-            log("Problem getting serial from %s" % basename)
-        serial = "%s-%s" % (m.group('num'), m.group('rev'))
-        tail = m.group('tail')
-    # some users have multiple sdb files that only differ
-    # toward the end of their filename. Add that as well
-    # to ensure unique temp table names
-    if not tail:
-        log("SDB tail empty. Wassup with that?")
-    tableid = '_%s_%s_%s_%s' % (iid,serial,tail,tablename)
-
-    # eliminate illegal chars in tableid
-    tableid = tableid.translate({ord(i):None for i in '-./'})
+    # Assemble the SQL commands
     full_tablename = "%s.%s" % (db_schema, tablename)
-    raw_tablename = "deleteme%s" % (tableid)
-    nodups_tablename = "deletemetoo%s" % (tableid)
-    idx_name = "deletemetoo%s_btree_idx" % (tableid)
+    raw_tablename = "tmpA%s" % (tableid)
+    nodups_tablename = "tmpB%s" % (tableid)
+    idx_name = "tmpB%s_btree_idx" % (tableid)
     ingestcmd = """
              SET SCHEMA '{sch}';
-             CREATE TABLE {rawtbl} (LIKE {maintbl}); 
-             -- load the raw table from the sqlite stream
+             CREATE TABLE {rawtbl} (LIKE {maintbl});
+             CREATE TABLE {nodupstbl} (LIKE {maintbl});
+             ALTER TABLE {nodupstbl} ADD CONSTRAINT {idx} UNIQUE (iid,ts);
+
+             -- load the raw table
              COPY {rawtbl} FROM STDIN delimiter '|' CSV;
-             """.format(maintbl=tablename, rawtbl=raw_tablename, 
-                        # nodupstbl=nodups_tablename,
+
+             -- copy the raw table to the nodups tbl 
+             -- while dropping records outside wear window 
+             -- and dropping duplicate records as well
+             INSERT INTO {nodupstbl}
+                SELECT * FROM {rawtbl}
+                WHERE ts >= '{start}' 
+                AND   ts <= '{end}'
+             ON CONFLICT (iid,ts) DO NOTHING;
+             """.format(maintbl=tablename, rawtbl=raw_tablename,
+                        nodupstbl=nodups_tablename,
+                        start=wear_start, end=wear_end,
                         idx=idx_name, sch=db_schema)
+    log("Dropping records outside wear window dates: %s - %s."%(wear_start,wear_end))
     absorbcmd = """
              SET SCHEMA '{sch}';
              INSERT INTO {maintbl}
-                SELECT * FROM {rawtbl};
-             DROP TABLE {rawtbl};
-             """.format(maintbl=tablename, rawtbl=raw_tablename, 
-                        # nodupstbl=nodups_tablename,
+                SELECT * FROM {nodupstbl};
+             -- DROP TABLE {rawtbl};
+             -- DROP TABLE {nodupstbl};
+             """.format(maintbl=tablename, rawtbl=raw_tablename,
+                        nodupstbl=nodups_tablename,
                         idx=idx_name, sch=db_schema)
-             # for debugging purposes, the rawtable can be kept in DB
-             # by prefixing -- to the DROP TABLE line
-             # But be cautious: it doubles the disk footprint of the
-             # ingested data.
+             # for debugging purposes, either tmp table can be kept in DB
+             # by prefixing '--' to the DROP TABLE line
+             # But be cautious: it increase the disk footprint of the
+             # ingested data significantly.
+
 
     # NOTE: There's still a minor issue here. We tend to want to ingest
     # an entire wave at a time, but if something goes wrong partway 
@@ -368,15 +374,16 @@ def execute_copy_via_shell(filepath, city,wave,stream,iid,
         log("Ingesting file %s failed with return code: %s"%(filepath,res))
         return False
 
-    # Run the hygiene scripts on the temp table
-    res = run_data_hygiene_scripts(city,wave,stream,iid,
-                                   raw_tablename, serial, hygiene_dir)
-    if res:
-        # If hygiene fails, the ingest for that participant should be 
-        # reported as unsuccessful.
-        log("Ingesting file %s failed hygiene tests with return code: %s"%(filepath,res))
-        return False
-
+    if False:
+        # Run the hygiene scripts on the temp table
+        res = run_data_hygiene_scripts(city,wave,stream,iid,
+                                    raw_tablename, serial, hygiene_dir)
+        if res:
+            # If hygiene fails, the ingest for that participant should be 
+            # reported as unsuccessful.
+            log("Ingesting file %s failed hygiene tests with return code: %s"%(filepath,res))
+            return False
+        
     # If the hygiene scripts succeeded, transfer temp table into main
     cmdline = 'psql %s -q -c "%s"' % (db_name, absorbcmd)
     mention("Absorb command line: %s" % cmdline)
@@ -483,13 +490,45 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
         # if we're looking for leaks, count rows before ingesting
         rows_before_ingest = count_db_rows('sd_gps') 
 
+    # based on the filename, determine the serial number of the 
+    # device being loaded and the name of the temp table we'll be
+    # loading into
+    tail = ''
+    serial = ''
+    basename = os.path.basename(filepath)
+    serialpat = "SD(?P<num>\d*)fw(?P<rev>\d*)_(?P<tail>.*)\.sdb"
+    m = re.match(serialpat, basename)
+    if m:
+        if not m.group('num') or not m.group('rev'):
+            log("Problem getting serial from %s" % basename)
+        serial = "%s-%s" % (m.group('num'), m.group('rev'))
+        tail = m.group('tail')
+    # some users have multiple sdb files that only differ
+    # toward the end of their filename. Add that as well
+    # to ensure unique temp table names
+    if not tail:
+        log("SDB tail empty. Wassup with that?")
+    tableprefix = '_%s_%s_%s' % (iidstr, serial, tail)
+    # eliminate illegal chars in tableid
+    tableprefix = tableprefix.translate({ord(i):None for i in '-./'})
+
+    # we also need to know the wear dates for this file in order to
+    # filter out extraneous records
+    wear_start, wear_end = get_participant_wear_dates(iidstr, city, wave, serial) 
+    if not wear_start or not wear_end:
+        log("Bad wear dates for user %s city %s wave %s serial %s"%(iidstr, city, wave, serial))
+
     # Now ingest each of the required tables into the DB.
     success = True
-    for tbl in selectionsql:
+    log("Only ingesting accel table during test.")
+    for main_tbl in ['sd_accel']: #selectionsql:
+        tableid = '%s_%s' % (tableprefix, main_tbl)
         success = success and execute_copy_via_shell(filepath, 
-                                                     city,wave,stream,
-                                                     iidstr, tbl, 
-                                                     selectionsql[tbl]) 
+                                                     city, wave, stream,
+                                                     iidstr, serial, tableid,
+                                                     wear_start, wear_end,
+                                                     main_tbl,
+                                                     selectionsql[main_tbl]) 
     if detect:
         # then count rows again after ingesting
         rows_after_ingest = count_db_rows('sd_gps') 
@@ -551,6 +590,35 @@ def count_db_rows(tablename):
         c.execute(sql)
         count = int(c.fetchone()[0])
     return count
+
+
+def get_participant_wear_dates(iid,city,wave,serial):
+    """Given user information, get wear dates from linkage table."""
+    sql = """
+            -- The protocol requires that the declared start date in 
+            -- the linkage table be the day the participant actually 
+            -- began wearing the device - not the day they received it.
+            -- Also assumes the declared final day of wearing includes 
+            -- any data up to 3am of the following day.
+        SELECT  started_wearing as start, stopped_wearing::date + INTERVAL '27 hours' as end 
+        FROM portal_dev.sensedoc_assignments
+        WHERE interact_id = {iid}
+        AND sensedoc_serial = '{serial}'
+        AND city_id = {city}
+        AND wave_id = {wave};
+        """.format(serial=serial,city=city,wave=wave,iid=iid)
+    wear_start = ''
+    wear_end = ''
+    with psycopg2.connect(user=db_user,
+                          host=db_host,
+                          port=db_host_port,
+                          database=db_name) as conn:
+        c = conn.cursor()
+        c.execute(sql)
+        row = c.fetchone()
+        wear_start = row[0]
+        wear_end = row[1]
+    return wear_start, wear_end
 
 
 if __name__ == '__main__':

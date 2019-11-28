@@ -53,7 +53,11 @@ EXIT_TABLE_MISSING = 2
 known_records_being_dropped = [
     {'city':1, 'wave':1, 'stream':2, 'iid':101002187,
         'table':'level_0.deleteme_0903_141604_rtc1sdb_sd_accel',
-        'where':"ts::date >= '2012-01-01' AND ts::date <= '2012-01-02'"},
+        'where':"ts::date >= '2012-01-01' AND ts::date <= '2012-01-02'", 'reason':"RTC reset without network connection, AFTER user stopped using device."},
+    {'city':1, 'wave':1, 'stream':2, 'iid':101624715, 
+    'table':'level_0.deleteme_101624715_722091_20170928_070350_sd_accel', 
+    'where':"ts::date < '2017-09-23' OR ts > '2017-09-27 03:00:00'", 
+    'reason':'Confirmed as coordinator traces'},
     ]
 
 execute_operations = False
@@ -88,7 +92,7 @@ def modify_db(cursor, sql):
        modifies the DB."""
     res = None
     if execute_operations:
-        mention("Executing volatile query: %s" % sql.strip())
+        print("Executing volatile query: %s" % sql.strip())
         res = cursor.execute(sql)
     else:
         mention("Suppressing volatile query: %s" % sql.strip())
@@ -148,10 +152,8 @@ if __name__ == '__main__':
                     droprec['table'] == target_table):
                     # drop the records
                     print("DROPPING SOME KNOWN BAD RECORDS FROM TBL %s."%target_table) 
-                    sql = """
-                        DELETE FROM {tbl} WHERE {where}; 
-                        """.format(tbl=target_table,
-                                    where=droprec['where'])
+                    sql = "DELETE FROM {tbl} WHERE {where};".format(tbl=target_table, where=droprec['where'])
+                    print(sql)
                     res = modify_db(cursor, sql)
             # Count number of records where timestamps outside window
             # of known wear dates for that participant.
@@ -170,12 +172,19 @@ if __name__ == '__main__':
                     AND l.city_id = 1
                     AND l.wave_id = 1
                     AND (t.ts < l.started_wearing::date
-                        -- protocol assumes that declared final day of 
-                        -- wearing includes any data up to 3am of 
-                        -- the following day.
+                            -- the protocol requires that the declared
+                            -- start date in the linkage table be the
+                            -- day the participant actually began 
+                            -- wearing the device - not the day they
+                            -- received it.
                         OR t.ts > l.stopped_wearing::date + INTERVAL '27 hours')
+                            -- protocol assumes the declared final 
+                            -- day of wearing includes any data up 
+                            ---to 3am of the following day.
                 GROUP BY t.iid;
             """.format(tbl=target_table,serial=serial)
+            err("Now testing for unexpected remainders.")
+            err(sql)
             row = query_db(cursor, sql)
             if row: 
                 if row[5] > 0:

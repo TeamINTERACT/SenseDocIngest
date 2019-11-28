@@ -17,6 +17,7 @@ import csv
 import psycopg2
 import dateparser
 from docopt import docopt
+from pprint import pprint
 
 def err(str):
     print("ERR: %s"%str)
@@ -100,11 +101,15 @@ with psycopg2.connect(user=db_user,
             # file to make them consistent.
             start_dt = dateparser.parse(row['start_recode'])
             stop_dt = dateparser.parse(row['end_recode'])
-            start = start_dt.strftime("%Y-%m-%d")
-            stop = stop_dt.strftime("%Y-%m-%d")
+            if start_dt and stop_dt:
+                start_str = start_dt.strftime("%Y-%m-%d")
+                stop_str = stop_dt.strftime("%Y-%m-%d")
+            else:
+                start_str = ''
+                stop_str = ''
 
             c.execute(insert_sql, (iid, serial, sid, cid, wid, 
-                                    start, stop, notes))
+                                    start_str, stop_str, notes))
         if not clean:
             conn.rollback()
 
