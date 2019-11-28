@@ -310,13 +310,13 @@ def execute_copy_via_shell(filepath, city, wave, stream, iid,
     # Assemble the SQL commands
     full_tablename = "%s.%s" % (db_schema, tablename)
     raw_tablename = "tmpA%s" % (tableid)
-    nodups_tablename = "tmpB%s" % (tableid)
+    filtered_tablename = "tmpB%s" % (tableid)
     idx_name = "tmpB%s_btree_idx" % (tableid)
     ingestcmd = """
              SET SCHEMA '{sch}';
              CREATE TABLE {rawtbl} (LIKE {maintbl});
-             CREATE TABLE {nodupstbl} (LIKE {maintbl});
-             ALTER TABLE {nodupstbl} ADD CONSTRAINT {idx} UNIQUE (iid,ts);
+             CREATE TABLE {filteredtbl} (LIKE {maintbl});
+             ALTER TABLE {filteredtbl} ADD CONSTRAINT {idx} UNIQUE (iid,ts);
 
              -- load the raw table
              COPY {rawtbl} FROM STDIN delimiter '|' CSV;
@@ -324,29 +324,24 @@ def execute_copy_via_shell(filepath, city, wave, stream, iid,
              -- copy the raw table to the nodups tbl 
              -- while dropping records outside wear window 
              -- and dropping duplicate records as well
-             INSERT INTO {nodupstbl}
+             INSERT INTO {filteredtbl}
                 SELECT * FROM {rawtbl}
                 WHERE ts >= '{start}' 
                 AND   ts <= '{end}'
              ON CONFLICT (iid,ts) DO NOTHING;
              """.format(maintbl=tablename, rawtbl=raw_tablename,
-                        nodupstbl=nodups_tablename,
+                        filteredtbl=filtered_tablename,
                         start=wear_start, end=wear_end,
                         idx=idx_name, sch=db_schema)
-    log("Dropping records outside wear window dates: %s - %s."%(wear_start,wear_end))
     absorbcmd = """
              SET SCHEMA '{sch}';
              INSERT INTO {maintbl}
-                SELECT * FROM {nodupstbl};
-             -- DROP TABLE {rawtbl};
-             -- DROP TABLE {nodupstbl};
+                SELECT * FROM {filteredtbl};
+             DROP TABLE {rawtbl};
+             DROP TABLE {filteredtbl};
              """.format(maintbl=tablename, rawtbl=raw_tablename,
-                        nodupstbl=nodups_tablename,
+                        filteredtbl=filtered_tablename,
                         idx=idx_name, sch=db_schema)
-             # for debugging purposes, either tmp table can be kept in DB
-             # by prefixing '--' to the DROP TABLE line
-             # But be cautious: it increase the disk footprint of the
-             # ingested data significantly.
 
 
     # NOTE: There's still a minor issue here. We tend to want to ingest
@@ -373,6 +368,11 @@ def execute_copy_via_shell(filepath, city, wave, stream, iid,
         # reported as unsuccessful.
         log("Ingesting file %s failed with return code: %s"%(filepath,res))
         return False
+
+    if detect:
+        raw_rows = count_db_rows(raw_tablename)
+        filtered_rows = count_db_rows(filtered_tablename)
+        log("IID: {}  SERIAL: {}  TABLE: {}  RAWROWS: {:,} INGESTEDROWS: {:,} RATE: {:.1%}".format(iid, serial, tablename, raw_rows, filtered_rows, float(filtered_rows)/raw_rows)) 
 
     if False:
         # Run the hygiene scripts on the temp table
@@ -486,9 +486,10 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
         # written to the file, keeping only the latest instance in cases
         # where records share the same timestamp info.
 
-    if detect:
+    if False and detect:
         # if we're looking for leaks, count rows before ingesting
-        rows_before_ingest = count_db_rows('sd_gps') 
+        gps_rows_before_ingest = count_db_rows('sd_gps') 
+        accel_rows_before_ingest = count_db_rows('sd_accel') 
 
     # based on the filename, determine the serial number of the 
     # device being loaded and the name of the temp table we'll be
@@ -517,11 +518,12 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
     wear_start, wear_end = get_participant_wear_dates(iidstr, city, wave, serial) 
     if not wear_start or not wear_end:
         log("Bad wear dates for user %s city %s wave %s serial %s"%(iidstr, city, wave, serial))
+    else:
+        log("Keeping records within wear dates: %s - %s."%(wear_start,wear_end))
 
     # Now ingest each of the required tables into the DB.
     success = True
-    log("Only ingesting accel table during test.")
-    for main_tbl in ['sd_accel']: #selectionsql:
+    for main_tbl in selectionsql:
         tableid = '%s_%s' % (tableprefix, main_tbl)
         success = success and execute_copy_via_shell(filepath, 
                                                      city, wave, stream,
@@ -529,18 +531,18 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
                                                      wear_start, wear_end,
                                                      main_tbl,
                                                      selectionsql[main_tbl]) 
-    if detect:
+    if False and detect:
         # then count rows again after ingesting
-        rows_after_ingest = count_db_rows('sd_gps') 
-        rows_ingested = rows_after_ingest - rows_before_ingest
-        rows_expected = gps_file_row_counts[filepath]
-        drop_rate = (rows_expected-float(rows_ingested))/rows_expected
-        log("ingested %d vs expected %d = %g loss for '%s'"%(rows_ingested,
-                    rows_expected, drop_rate, filepath))
-        if drop_rate > 0.7:
-            print("Dropped WAY too many records for %s (%g). Emergency stop."%(iidstr,drop_rate))
-            exit()
-    return success
+        gps_rows_after_ingest = count_db_rows('sd_gps') 
+        gps_rows_ingested = gps_rows_after_ingest - gps_rows_before_ingest
+        gps_rows_expected = gps_file_row_counts[filepath]
+        gps_drop_rate = (gps_rows_expected-float(gps_rows_ingested))/gps_rows_expected
+        log("GPS ingested %d vs expected %d = %g loss for '%s'"%(gps_rows_ingested,
+                    gps_rows_expected, gps_drop_rate, filepath))
+        # if drop_rate > 0.7:
+        #     print("Dropped WAY too many records for %s (%g). Emergency stop."%(iidstr,drop_rate))
+        #     exit()
+    # return success
 
 
 def ingest_user_files(iidstr, city,wave,stream, filepathlist):
@@ -630,6 +632,7 @@ if __name__ == '__main__':
         logfile = args['-L']
 
     detect = args['-D']
+    detect = True
 
     if args['-E']:
         print("Command line args:")
@@ -744,8 +747,9 @@ if __name__ == '__main__':
             else:
                 log("Inventory ? %s" % iidstr)
 
-        # Count final GPS table size
+        # Count final table sizes
         final_gps_rows = count_db_rows('sd_gps') 
+        final_accel_rows = count_db_rows('sd_accel') 
 
         # Report before, after, and expected row counts. After the
         # initial baseline, we only track GPS table rows, as they are 
@@ -755,10 +759,11 @@ if __name__ == '__main__':
                                     screen=True,prebreak=True)
         log("Expected GPS Count: %d"%(baseline_gps_rows+expected_gps_rows),screen=True)
         log("Complete GPS Count: %d"%final_gps_rows, screen=True)
+
         ingested_gps_rows = final_gps_rows - baseline_gps_rows
         ingest_rate = 100.0*float(ingested_gps_rows)/float(expected_gps_rows)
         if ingest_rate > 99.5:
-            log("Ingest looks successful with %0.2f%% row retention."%ingest_rate, screen=True)
+            log("Based on GPS data, ingest looks successful with %0.2f%% row retention."%ingest_rate, screen=True)
             log("Remember, some minor row loss is expected due to timestamp duplication in SDB files.",screen=True)
         else:
             log("Row retention of %0.2f%% looks low."%ingest_rate, screen=True) 
