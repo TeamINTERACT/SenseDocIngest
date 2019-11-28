@@ -32,6 +32,7 @@ Options:
 """
 import os
 import re
+import csv
 import sqlite3
 import datetime
 import psycopg2
@@ -672,6 +673,13 @@ if __name__ == '__main__':
             target_iids.append(args['-i'])
             print("WARNING: Ingesting only IIDs " + ','.join(target_iids))
 
+        # load the list of files we should explicitly skip
+        exceptionfiles = []
+        with open('./ingest_exceptions.csv', 'r') as fh:
+            for row in csv.DictReader(filter(lambda row: row.strip()[0]!='#',fh)):
+                if row['action'] == 'skip':
+                    exceptionfiles.append(row['filename'])
+
         if args['PATH']:
             # Ingesting a single file is quick and easy.
             # (This is used primarily for testing.)
@@ -711,6 +719,9 @@ if __name__ == '__main__':
                     continue
                 # all sdb data within folder belongs to given participant
                 for filename in os.listdir(folderpath):
+                    if filename in exceptionfiles:
+                        log("File '%s' is a known exception.  Skipping."%filename) 
+                        continue
                     filepath = os.path.join(folderpath, filename)
                     if filename.lower().endswith('.sdb'):
                         if not iidstr in participant_files:
