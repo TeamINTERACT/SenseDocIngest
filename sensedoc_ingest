@@ -617,7 +617,8 @@ def get_participant_wear_dates(iid,city,wave,serial):
         SELECT  started_wearing as start, stopped_wearing::date + INTERVAL '27 hours' as end 
         FROM portal_dev.sensedoc_assignments
         WHERE interact_id = {iid}
-        AND sensedoc_serial = '{serial}'
+            -- some serials in table have leading 0s and others do not
+        AND sensedoc_serial ~ '0*{serial}'
         AND city_id = {city}
         AND wave_id = {wave};
         """.format(serial=serial,city=city,wave=wave,iid=iid)
