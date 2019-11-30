@@ -18,7 +18,7 @@ NOTE:
 After discussion with ComputeCanada IT, they discourage running this kind of job in parallel because opening and closing lots of smaller files actually degrades performance, given the underlying structures used for the file system.
 
 Usage:
-  sensedoc_ingest [options] PATH CITYID WAVEID STREAMID
+  sensedoc_ingest [options] PATH CITYID WAVEID 
   sensedoc_ingest -h | --help | -V | --version
 
 Options:
@@ -70,26 +70,26 @@ loghandle = None
 expected_gps_rows = 0
 gps_file_row_counts = {}
 
-def log(msg, prebreak=False, screen=False):
+warnings_issued = False
+def log(msg, prebreak=False, prefix='LOG'):
+    prefix = ''
     if loghandle:
         if prebreak:
             loghandle.write("\n")
-        loghandle.write("%s\n" % msg)
+        loghandle.write("%s: %s\n" % (prefix,msg))
         loghandle.flush()
-    if screen:
-        if prebreak:
-            print('')
-        print("LOG: %s" % msg)
 
 def mention(str):
     if args['--verbose']:
-        print(str)
-        # verbose statements written to the log as well as the screen
-        # if loghandle:
-            # loghandle.write("%s\n"%str)
+        log(str, prefix="DBG")
+
+def warn(str):
+    warnings_issued = True
+    log(str, prefix="WRN"))
 
 def err(str):
-    log("ERR: %s"%str)
+    log(str,prefix="ERR")
+    print("ERROR: %s"%str)
     exit(1)
 
 def test_overlapping_daterange(dt1_st, dt1_end, dt2_st, dt2_end):
@@ -167,7 +167,7 @@ def select_usable_files(filelist, iidstr):
 
         # make a note of those stats if they're usable
         if mindate and maxdate and count:
-            log("Keeping file %s"% fpath)
+            mention("Keeping file %s"% fpath)
             fstats.append([mindate,maxdate,count,fpath])
         else: # otherwise leave this file out of the list
             log("File %s unacceptable (%s, %s, %s)" % (fpath,
@@ -178,18 +178,18 @@ def select_usable_files(filelist, iidstr):
         # compare all possible pairings of files and reject 
         # this filelist if any pair has overlap between 
         # their min and max date stamps.
-        log("Testing overlaps for %s"% iidstr)
+        mention("Testing overlaps for %s"% iidstr)
         for stat1,stat2 in combinations(fstats,2):
             if test_overlapping_daterange(stat1[0], stat1[1], 
                                           stat2[0], stat2[1]):
-                log("Overlapping timestamps found between files:")
+                log("Overlapping timestamps for %s found between files:"%iidstr)
                 log("  %s" % (stat1[3]))
                 log("    %s -> %s"%(stat1[0], stat1[1])) 
                 log("    %s -> %s"%(stat2[0], stat2[1])) 
                 log("  %s" % (stat2[3]))
                 return None
             else:
-                log("Overlap clean.")
+                mention("Overlap clean.")
         # total the number of samples from all files and
         # reject the filelist if the number of samples does not
         # meet the minimum threshold
@@ -373,7 +373,7 @@ def execute_copy_via_shell(filepath, city, wave, stream, iid,
     if detect:
         raw_rows = count_db_rows(raw_tablename)
         filtered_rows = count_db_rows(filtered_tablename)
-        log("IID: {}  SERIAL: {}  TABLE: {}  RAWROWS: {:,} INGESTEDROWS: {:,} RATE: {:.1%}".format(iid, serial, tablename, raw_rows, filtered_rows, float(filtered_rows)/raw_rows)) 
+        log("STATS: IID={}  SERIAL={}  TABLE={}  RAWROWS={:,} INGESTEDROWS={:,} RATE={:.1%}".format(iid, serial, tablename, raw_rows, filtered_rows, float(filtered_rows)/raw_rows)) 
 
     if False:
         # Run the hygiene scripts on the temp table
@@ -399,6 +399,17 @@ def execute_copy_via_shell(filepath, city, wave, stream, iid,
 
     return True
 
+def create_table_prefix(fname, iidstr):
+    """
+    Given a filename and an iid, combine them to create a compact
+    name for a temp table.
+    """
+    prefix = "%s_" % iidstr
+    prefix += ''.join([x for x in fname if x.isalnum()])
+
+    return prefix
+
+
 def ingest_sdb_file(filepath,city,wave,stream,iidstr):
     """
     Given an SDB datafile, load its tables into the database,
@@ -415,7 +426,7 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
     else:
         log("SDB FILE '%s' was never row-counted.")
 
-    log("Ingesting file: %s"%filepath)
+    log("Ingesting file: %s"%os.path.basename(filepath))
     with sqlite3.connect(filepath) as conn:
         # get the reference date from the SDB from which all 
         # timestamps are measured
@@ -492,35 +503,46 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
         gps_rows_before_ingest = count_db_rows('sd_gps') 
         accel_rows_before_ingest = count_db_rows('sd_accel') 
 
-    # based on the filename, determine the serial number of the 
-    # device being loaded and the name of the temp table we'll be
-    # loading into
-    tail = ''
+    # based on the name of the file being processed, construct a
+    # temporary tablename we can use for loading this data.
+    # In some cases, we may want to leave the table around after 
+    # ingest (for forensic purposes) and if we want that to work
+    # each table has to have a unique name.
+    # tail = ''
     serial = ''
     basename = os.path.basename(filepath)
+    tableprefix = create_table_prefix(basename, iidstr)
     serialpat = "SD(?P<num>\d*)fw(?P<rev>\d*)_(?P<tail>.*)\.sdb"
     m = re.match(serialpat, basename)
     if m:
         if not m.group('num') or not m.group('rev'):
-            log("Problem getting serial from %s" % basename)
+            log("Malformed SDB filename: %s. Does not contain device serial number" % basename)
+            return False
         serial = "%s-%s" % (m.group('num'), m.group('rev'))
-        tail = m.group('tail')
-    # some users have multiple sdb files that only differ
-    # toward the end of their filename. Add that as well
-    # to ensure unique temp table names
-    if not tail:
-        log("SDB tail empty. Wassup with that?")
-    tableprefix = '_%s_%s_%s' % (iidstr, serial, tail)
-    # eliminate illegal chars in tableid
-    tableprefix = tableprefix.translate({ord(i):None for i in '-./'})
+    if False:
+        serialpat = "SD(?P<num>\d*)fw(?P<rev>\d*)_(?P<tail>.*)\.sdb"
+        m = re.match(serialpat, basename)
+        if m:
+            if not m.group('num') or not m.group('rev'):
+                log("Problem getting serial from %s" % basename)
+            serial = "%s-%s" % (m.group('num'), m.group('rev'))
+            tail = m.group('tail')
+        # some users have multiple sdb files that only differ
+        # toward the end of their filename. Add that as well
+        # to ensure unique temp table names
+        if not tail:
+            log("SDB tail empty. Wassup with that?")
+        tableprefix = '_%s_%s_%s' % (iidstr, serial, tail)
+        # eliminate illegal chars in tableprefix
+        tableprefix = tableprefix.translate({ord(i):None for i in '-./'})
 
     # we also need to know the wear dates for this file in order to
     # filter out extraneous records
     wear_start, wear_end = get_participant_wear_dates(iidstr, city, wave, serial) 
     if not wear_start or not wear_end:
-        log("Bad wear dates for user %s city %s wave %s serial %s"%(iidstr, city, wave, serial))
+        warn("No wear dates in linkage tbl for user %s city %s wave %s serial %s"%(iidstr, city, wave, serial))
     else:
-        log("Keeping records within wear dates: %s - %s."%(wear_start,wear_end))
+        mention("Keeping records within wear dates: %s - %s."%(wear_start,wear_end))
 
     # Now ingest each of the required tables into the DB.
     success = True
@@ -532,18 +554,7 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
                                                      wear_start, wear_end,
                                                      main_tbl,
                                                      selectionsql[main_tbl]) 
-    if False and detect:
-        # then count rows again after ingesting
-        gps_rows_after_ingest = count_db_rows('sd_gps') 
-        gps_rows_ingested = gps_rows_after_ingest - gps_rows_before_ingest
-        gps_rows_expected = gps_file_row_counts[filepath]
-        gps_drop_rate = (gps_rows_expected-float(gps_rows_ingested))/gps_rows_expected
-        log("GPS ingested %d vs expected %d = %g loss for '%s'"%(gps_rows_ingested,
-                    gps_rows_expected, gps_drop_rate, filepath))
-        # if drop_rate > 0.7:
-        #     print("Dropped WAY too many records for %s (%g). Emergency stop."%(iidstr,drop_rate))
-        #     exit()
-    # return success
+    return success
 
 
 def ingest_user_files(iidstr, city,wave,stream, filepathlist):
@@ -619,8 +630,11 @@ def get_participant_wear_dates(iid,city,wave,serial):
         c = conn.cursor()
         c.execute(sql)
         row = c.fetchone()
-        wear_start = row[0]
-        wear_end = row[1]
+        if row:
+            wear_start = row[0]
+            wear_end = row[1]
+        else:
+            log("Unable to find wear dates for serial: '%s'"%serial)
     return wear_start, wear_end
 
 
@@ -653,9 +667,10 @@ if __name__ == '__main__':
     wavenum = -1
     if args['WAVEID']:
         wavenum = int(args['WAVEID'])
-    streamnum = -1
-    if args['STREAMID']:
-        streamnum = int(args['STREAMID'])
+
+    # This var shouldn't be needed anywhere, because this script only 
+    # ingests sensedoc data, but I'll set it for completeness
+    streamnum = 2
 
     if args['-H']:
         hygiene_dir = args['-H']
@@ -781,3 +796,8 @@ if __name__ == '__main__':
             log("Minor row loss is expected due to duplicated timestamps in the SDB files, but this seems excessive.", screen=True) 
             log("But if this was a re-ingest of an uncompleted previous ingest cycle, high row loss is to be expected.", screen=True)
 
+
+        if warnings_issued:
+            print("\nBE ADVISED THAT WARNINGS WERE ISSUED. (Check log for details.)")
+        else:
+            print("\nThe ingest was processed without warnings.")
