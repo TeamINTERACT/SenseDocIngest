@@ -1,6 +1,9 @@
-# Records are added to this file after they come up as exceptions
-# during ingest and are subsequently investigated.
-iid,file,city,wave,action,reason
+# When a file is reported as problematic during an ingest, we need
+# to investigate, to determine whether the exception requires further
+# action. But since we may ingest those files again later, we don't
+# want to have to repeat these investigations. So we make entries in 
+# this file, which will cause these exception reports to be suppressed.
+iid,filename,city,wave,action,reason
 101002187,SD109fw2091_20170903_141604_rtc1.sdb,1,1,skip,"Device reset spuriously AFTER wear window closed. Not relevant data."
 101172402,SD36fw2090_20170805_125532.sdb,1,1,skip,"Data predates wear window."
 101061024,SD235fw2091_20170718_105134.sdb,1,1,skip,"Data predates wear window."
@@ -12,3 +15,4 @@ iid,file,city,wave,action,reason
 101219235,SD158fw2075_20170921_205914.sdb,1,1,skip,"Data predates wear window."
 101710208,SD59fw2096_20171123_121214.sdb,1,1,skip,"Data predates wear window."
 101761435,SD17fw2096_20171027_134412.sdb,1,1,skip,"Data predates wear window."
+101761435,SD17fw2096_20171027_134412_rtc1.sdb,1,1,skip,"Data predates wear window."

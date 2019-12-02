@@ -85,7 +85,7 @@ def mention(str):
 
 def warn(str):
     warnings_issued = True
-    log(str, prefix="WRN"))
+    log(str, prefix="WRN")
 
 def err(str):
     log(str,prefix="ERR")
@@ -694,7 +694,7 @@ if __name__ == '__main__':
         with open('./ingest_exceptions.csv', 'r') as fh:
             for row in csv.DictReader(filter(lambda row: row.strip()[0]!='#',fh)):
                 if row['action'] == 'skip':
-                    exceptionfiles.append(row['filename'])
+                    exceptionfiles.append(row['filename'].strip())
 
         if args['PATH']:
             # Ingesting a single file is quick and easy.
@@ -782,20 +782,19 @@ if __name__ == '__main__':
         # initial baseline, we only track GPS table rows, as they are 
         # much smaller than the accel tables, so they're much faster to 
         # compute and still provide a reasonable metric of success.
-        log("Baseline GPS Count: %d"%baseline_gps_rows,
-                                    screen=True,prebreak=True)
-        log("Expected GPS Count: %d"%(baseline_gps_rows+expected_gps_rows),screen=True)
-        log("Complete GPS Count: %d"%final_gps_rows, screen=True)
+        log("Baseline GPS Count: %d"%baseline_gps_rows)
+        log("Expected GPS Count: %d"%(baseline_gps_rows+expected_gps_rows))
+        log("Complete GPS Count: %d"%final_gps_rows)
 
         ingested_gps_rows = final_gps_rows - baseline_gps_rows
         ingest_rate = 100.0*float(ingested_gps_rows)/float(expected_gps_rows)
         if ingest_rate > 99.5:
-            log("Based on GPS data, ingest looks successful with %0.2f%% row retention."%ingest_rate, screen=True)
-            log("Remember, some minor row loss is expected due to timestamp duplication in SDB files.",screen=True)
+            log("Based on GPS data, ingest looks successful with %0.2f%% row retention."%ingest_rate)
+            log("Remember, some minor row loss is expected due to timestamp duplication in SDB files.")
         else:
-            log("Row retention of %0.2f%% looks low."%ingest_rate, screen=True) 
-            log("Minor row loss is expected due to duplicated timestamps in the SDB files, but this seems excessive.", screen=True) 
-            log("But if this was a re-ingest of an uncompleted previous ingest cycle, high row loss is to be expected.", screen=True)
+            log("Row retention of %0.2f%% looks low."%ingest_rate) 
+            log("Minor row loss is expected due to duplicated timestamps in the SDB files, but this seems excessive.") 
+            log("But if this was a re-ingest of an uncompleted previous ingest cycle, high row loss is to be expected.")
 
 
         if warnings_issued:
