@@ -1,3 +1,7 @@
+# The VicW1 devices were originally recorded with bad IID values.
+# They were corrected using the following data, so there should
+# no longer be any references to the original ids. But we'll keep 
+# this file on hand, just in case. 
 bad_iid,good_iid
 101065382,101096844
 101757692,101710208

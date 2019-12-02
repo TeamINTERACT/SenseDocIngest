@@ -1,0 +1,37 @@
+ERR: Table level_0.deleteme__20171206_085141sdb_sd_accel contains 9022918 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2017-11-30 00:00:00.020000-08:00 to 2017-12-06 16:49:44.920000-08:00
+
+ERR: Table level_0.deleteme__20171129_191117sdb_sd_accel contains 133951 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2017-11-30 00:17:15-08:00 to 2017-11-30 03:09:01.540000-08:00
+
+ERR: Table level_0.deleteme__20171208_133004sdb_sd_accel contains 334 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2017-12-08 21:29:05-08:00 to 2017-12-08 21:29:11.660000-08:00
+
+ERR: Expected DB table level_0.deleteme_85368_59DADJDUMsdb_sd_accel missing.
+
+ERR: Table level_0.deleteme__20171203_104937sdb_sd_accel contains 1439 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2017-12-03 18:46:33-08:00 to 2017-12-03 18:47:01.760000-08:00
+
+ERR: Table level_0.deleteme__20170729_150501sdb_sd_gps contains 1 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2016-07-21 01:54:00-07:00 to 2016-07-21 01:54:00-07:00
+
+ERR: Table level_0.deleteme__20171129_194712sdb_sd_accel contains 179554 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2017-11-30 01:55:57-08:00 to 2017-11-30 03:47:02.680000-08:00
+
+ERR: Table level_0.deleteme__20170704_122559sdb_sd_gps contains 1 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2016-06-22 03:02:53-07:00 to 2016-06-22 03:02:53-07:00
+
+ERR: Table level_0.deleteme__20170718_081952sdb_sd_gps contains 1 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2016-07-09 23:31:47-07:00 to 2016-07-09 23:31:47-07:00
+
+ERR: Table level_0.deleteme__20171213_093015sdb_sd_accel contains 234662 out-of-bounds timestamps.
+ERR:       Expected wear dates: 2017-05-19 to 2017-11-30
+ERR:       Dates found: 2017-11-30 00:00:00.020000-08:00 to 2017-11-30 01:19:08.300000-08:00

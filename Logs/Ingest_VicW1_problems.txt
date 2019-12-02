@@ -1,0 +1,76 @@
+I've found two classes of problems reported during the ingest of Victoria Wave 1.
+
+All rows in SDB were rejected because the data was premature:
+    IID: 101172402  SERIAL: 36-2090  TABLE: sd_accel  RAWROWS: 515,713 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101172402  SERIAL: 36-2090  TABLE: sd_gps  RAWROWS: 9,458 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD36fw2090_20170805_125532.sdb
+        data dates: 2017-06-21 - 2017-0623
+        wear dates: 2017-07-19 - 2017-07-28
+    IID: 101061024  SERIAL: 235-2091  TABLE: sd_accel  RAWROWS: 20,586 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101061024  SERIAL: 235-2091  TABLE: sd_gps  RAWROWS: 411 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD235fw2091_20170718_105134.sdb
+        data dates: 2017-06-21 - 2017-06-21
+        wear dates: 2017-06-27 - 2017-07-06
+    IID: 101896664  SERIAL: 78-2090  TABLE: sd_accel  RAWROWS: 507,901 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101896664  SERIAL: 78-2090  TABLE: sd_gps  RAWROWS: 7,491 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD78fw2090_20170710_140926.sdb
+        data dates: 2017-06-02 - 2017-06-05
+        wear dates: 2017-06-23 - 2017-07-02
+    IID: 101143070  SERIAL: 9-2090  TABLE: sd_accel  RAWROWS: 1,846,951 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101143070  SERIAL: 9-2090  TABLE: sd_gps  RAWROWS: 2,968 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD9fw2090_20171018_152312.sdb 
+        data dates: 2017-06-30 - 2017-07-13
+        wear dates: 2017-09-30 - 2017-10-10
+    IID: 101107968  SERIAL: 39-2090  TABLE: sd_accel  RAWROWS: 2,941 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101107968  SERIAL: 39-2090  TABLE: sd_gps  RAWROWS: 13 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD39fw2090_20171107_125052.sdb
+        data dates: 2017-10-18 - 2017-10-18
+        wear dates: 2017-10-23 - 2017-11-02
+    IID: 101962906  SERIAL: 111-2096  TABLE: sd_accel  RAWROWS: 540,142 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101962906  SERIAL: 111-2096  TABLE: sd_gps  RAWROWS: 10,093 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD111fw2096_20171029_115031.sdb
+        data dates: 2017-10-10 - 2017-10-11
+        wear dates: 2017-11-11 - 2017-11-11
+    IID: 101864035  SERIAL: 104-2090  TABLE: sd_accel  RAWROWS: 1,800,988 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101864035  SERIAL: 104-2090  TABLE: sd_gps  RAWROWS: 24,485 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD104fw2090_20170917_121619.sdb
+        data dates: 2017-06-19 - 2017-07-07
+        wear dates: 2017-08-02 - 2017-08-13
+    IID: 101219235  SERIAL: 158-2075  TABLE: sd_accel  RAWROWS: 474,230 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101219235  SERIAL: 158-2075  TABLE: sd_gps  RAWROWS: 3,545 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD158fw2075_20170921_205914.sdb
+        data dates: 2017-05-28 - 2017-06-01
+        wear dates: 2017-09-08 - 2017-09-17
+    IID: 101710208  SERIAL: 59-2096  TABLE: sd_accel  RAWROWS: 2,669 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101710208  SERIAL: 59-2096  TABLE: sd_gps  RAWROWS: 52 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD59fw2096_20171123_121214.sdb
+        data dates: 2017-10-17 - 2017-10-17
+        wear dates: 2017-10-19 - 2017-10-28
+    IID: 101761435  SERIAL: 17-2096  TABLE: sd_accel  RAWROWS: 30,364 INGESTEDROWS: 0 RATE: 0.0%
+    IID: 101761435  SERIAL: 17-2096  TABLE: sd_gps  RAWROWS: 13 INGESTEDROWS: 0 RATE: 0.0%
+    FILE: SD17fw2096_20171027_134412.sdb 
+        data dates: 2017-10-10 - 2017-10-10
+        wear dates: 2017-10-15 - 2017-10-25
+
+Unable to find wear dates listed in linkage table:
+    Leading zero mismatch:
+    Record in linkage table has leading 0s, while search term does not.
+        Bad wear dates for user 101794991 city 1 wave 1 serial 6-2090
+        Bad wear dates for user 101228883 city 1 wave 1 serial 9-2090
+        Bad wear dates for user 101293204 city 1 wave 1 serial 6-2090
+        Bad wear dates for user 101199093 city 1 wave 1 serial 9-2090
+    Fixed by using regex search in SQL query that allows prefix 0s
+
+    SDB file has nonstandard filename:
+        This is because:
+        SDB files contains sd but no fw
+            Bad wear dates for user 101663527 city 1 wave 1 serial 
+                data spans 2017-05-28 - 2017-06-10
+        SDB files contains no sd or fw
+            Bad wear dates for user 101585368 city 1 wave 1 serial 
+                data spans 2017-06-09 - 2017-06-17
+            Bad wear dates for user 101818131 city 1 wave 1 serial 
+                data spans 2017-07-25 - 2017-08-28
+            Bad wear dates for user 101978056 city 1 wave 1 serial 
+                data spans 2017-06-16 - 2017-06-22
+    Fixed by renaming files based on the serial info in the linkage table and the creation date listed in the ancillary table within the SDB file itself.

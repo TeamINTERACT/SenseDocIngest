@@ -1,0 +1,18 @@
+We recently discovered an incoming SDB file in which all the telemetry was timestamped in 2012. It turns out the device had malfunctioned and its internal clock was set wrong, so all the timestamps were wrong too.
+
+In that particular case, the data turned out to be spurious, and we could safely filter it out at ingest time. But it raises a subtle issue.
+
+When filtering telemetry data for ingest, we are frequently going to encounter data from outside the user's declared wear window, collected while the device was still in the possession of the coordinator.
+
+But there are other possible cases (like the 2012 case) in which the dates are more extreme.
+
+The current ingest system requires me to track an exception log of every known case of "safely ignorable" data for every device. The problem is that this list will get pretty bulky if I have to track every case of coordinator data. The bigger that exception list gets, the easier it is for mistakes to happen.
+
+What would be ideal would be to define a wider wear-date window during which we are comfortable saying "extraneous traces in that period are probably coordinator, so ignore them, but if they're outside that wider range, they require investigation."
+
+So I can see three options:
+    - choose some arbitrary extension values - like 2 days prior to declared start time and 5 days after declared stop.
+    - use the data collection window for the entire study
+    - suck it up and investigate every single case of data timestamped outside the users's wear dates.
+
+
