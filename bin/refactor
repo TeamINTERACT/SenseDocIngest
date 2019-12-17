@@ -23,7 +23,7 @@ NOTE: Because these files are the fundamental data layer, we have to be extremel
 
 Verification
 ------------
-In principle, verification can be done by creating a master list of all files in the tree and then generating a checksum fingerprint for each. If the fingerprint list for both the source and destination hierarchies are the same, then the refactoring was a success, regardless of paths and file names.  
+The refactored directory structure can be verified using verify_refactor.  This script creates a master list of all files in the tree and then generates a checksum fingerprint for each. If the fingerprint list for both the source and destination hierarchies are the same, then the refactoring was a success, regardless of paths and file names.  
 
 Usage:
   refactor [options] SRCPATH DESTPATH
@@ -34,6 +34,7 @@ Options:
     -L FNAME      Save log to FNAME
     -i IID        Refactor participant IID only
     --make-it-so  Actually execute the file manipulations
+    -c CSVFILE    Apply iid corrections from CSVFILE
     -v,--verbose  Provide more verbose output
 """
 
@@ -128,6 +129,10 @@ if __name__ == '__main__':
     if args['-L']:
         logfile = args['-L']
 
+    iid_corrections_fname = ''
+    if args['-c']:
+        iid_corrections_fname = args['-c']
+
     with open(logfile, 'w') as loghandle:
         src_root_path = args['SRCPATH']
         dest_root_path = args['DESTPATH']
@@ -138,10 +143,17 @@ if __name__ == '__main__':
         # get a list of the correct iids to use when renaming the
         # old directories that were named with erroneous iids
         iid_corrections = {}
-        with open('sd_id_corrections.csv','r',encoding='ISO-8859-1') as ffix:
-            reader = csv.DictReader(ffix)
-            for row in list(reader):
-                iid_corrections[row['bad_iid']] = row['good_iid']
+        if iid_corrections_fname:
+            with open(iid_corrections_fname, 'r',
+                      encoding='ISO-8859-1') as ffix:
+                reader = csv.DictReader(ffix)
+                for row in list(reader):
+                    iid_corrections[row['bad_iid']] = row['good_iid']
+        else:
+            # if there are no iid corrections, define passive
+            # corrections
+            for iid in src_dirs:
+                iid_corrections[iid] = iid
 
         # Now traverse the source directories and look for the
         # device-specific subdirectories that need to be promoted to 
@@ -198,16 +210,18 @@ if __name__ == '__main__':
 
         print("Moving subdirectories...")
         for sub_src in tqdm(subdir_moves):
-            log("Moving subdir:\n  %s\n  %s"%(sub_src[80:],subdir_moves[sub_src][80:]))
+            log("Moving subdir:\n  %s\n  %s"%(sub_src,subdir_moves[sub_src]))
             if args['--make-it-so']:
-                cmd = ['mv', sub_src, subdir_moves[sub_src]]
-                sub.call(cmd)
+                if not sub_src == subdir_moves[sub_src]:
+                    cmd = ['mv', sub_src, subdir_moves[sub_src]]
+                    sub.call(cmd)
         print("Moving participant directories...")
         for src_dir in tqdm(dir_moves):
-            log("Moving dir:\n  %s\n  %s"%(src_dir[80:],dir_moves[src_dir][80:]))
+            log("Moving dir:\n  %s\n  %s"%(src_dir,dir_moves[src_dir]))
             if args['--make-it-so']:
-                cmd = ['mv',  src_dir, dir_moves[src_dir]]
-                sub.call(cmd)
+                if not src_dir == dir_moves[src_dir]:
+                    cmd = ['mv',  src_dir, dir_moves[src_dir]]
+                    sub.call(cmd)
         print("Renaming data files...")
         if args['--make-it-so']:
             for root,dirs,files in tqdm(os.walk(dest_root_path)):
@@ -216,10 +230,12 @@ if __name__ == '__main__':
                         [bad_iid,good_iid] = rename_targets[fname]
                         src_path = os.path.join(root,fname)
                         dest_path = src_path.replace(bad_iid,good_iid)
-                        log("Renaming file:\n  %s\n %s"%(src_path,dest_path))
-                        cmd = ['mv', src_path, dest_path]
-                        sub.call(cmd)
+                        if not src_path == dest_path:
+                            log("Renaming file:\n  %s\n %s"%(src_path,dest_path))
+                            cmd = ['mv', src_path, dest_path]
+                            sub.call(cmd)
         else:
             for fname in rename_targets:
                 [bad_iid,good_iid] = rename_targets[fname]
-                log("Renaming file: %s (%s -> %s)"%(fname,bad_iid,good_iid))
+                if not bad_iid == good_iid:
+                    log("Renaming file: %s (%s -> %s)"%(fname,bad_iid,good_iid))

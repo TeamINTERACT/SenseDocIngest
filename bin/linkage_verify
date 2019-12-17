@@ -85,7 +85,7 @@ if __name__ == '__main__':
 
                     for sdfw in sdids.split('/'):
                         sdid,dum,fw = sdfw.strip().partition('-')
-                        if sdid.lower() == 'na':
+                        if not sdid or sdid.lower() == 'na':
                             pass
                         elif all(x in '0123456789' for x in sdid):
                             sdid = str(int(sdid))
