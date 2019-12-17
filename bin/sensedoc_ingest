@@ -27,6 +27,7 @@ Options:
     -L FNAME      Save log to FNAME
     -D            Detect row leakage
     -i IID        Ingest participant IID only
+    -e FNAME      Load a list of files to skip with known problems 
     -E            Display runtime environment vars and then quit 
     -v,--verbose  Provide more verbose output
 """
@@ -647,6 +648,10 @@ if __name__ == '__main__':
     if args['-L']:
         logfile = args['-L']
 
+    exceptions_csv = ''
+    if args['-e']:
+        exceptions_csv = args['-e']
+
     detect = args['-D']
     detect = True
 
@@ -691,10 +696,11 @@ if __name__ == '__main__':
 
         # load the list of files we should explicitly skip
         exceptionfiles = []
-        with open('./ingest_exceptions.csv', 'r') as fh:
-            for row in csv.DictReader(filter(lambda row: row.strip()[0]!='#',fh)):
-                if row['action'] == 'skip':
-                    exceptionfiles.append(row['filename'].strip())
+        if exceptions_csv and os.path.isfile(exceptions_csv):
+            with open(exceptions_fname, 'r') as fh:
+                for row in csv.DictReader(filter(lambda row: row.strip()[0]!='#',fh)):
+                    if row['action'] == 'skip':
+                        exceptionfiles.append(row['filename'].strip())
 
         if args['PATH']:
             # Ingesting a single file is quick and easy.

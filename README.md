@@ -1,5 +1,15 @@
 What follows is a step-by-step protocol for ingesting a city/wave of data.
 
+VERIFY that all SDB folders are named in the form <IID>_<deviceid>
+VERIFY that all assignments in linkage file have associated data dirs
+VERIFY that all sdb data dirs are associated with known participants
+
+ALTER linkage.csv file to conform to column names expected by verifier
+ALTER sdb filenames to 
+
+INGEST linkage file into sensedoc_assignments
+INGEST SDB folders
+
 Preparation
     if linkage was managed in an external file,
         

@@ -9,6 +9,8 @@ Usage:
 
 Options:
     -h            Display this help info
+    -c            Show output in CSV format
+    -f            Force a filename output even if some fields missing
     -v,--verbose  Provide more verbose output
 """
 
@@ -37,6 +39,15 @@ if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
 
     dirpath = args['DIRPATH']
+    last = os.path.basename(dirpath)
+    if all(x in '0123456789_' for x in last):
+        iid,dummy,fpdev = last.partition('_')
+    elif last.isnumeric():
+        iid = last
+        fpdev = ''
+    else:
+        iid = ''
+        fpdev = ''
 
     logpath = ''
     syspath = os.path.join(dirpath, "System")
@@ -100,24 +111,41 @@ if __name__ == '__main__':
                         exdate += timedelta(0, offset)
                     else:
                         mention("No dateline found yet.")
+        all_fields_found = True
+        if iid:
+            mention("InteractID number is: %s"% iid)
+        else:
+            mention("InteractID number not identifiable.")
+            all_fields_found = False
+        if fpdev:
+            mention("Device id from path is: %s"% fpdev)
+        else:
+            mention("Device ID number not identifiable in path.")
         if idnumber:
-            print("Device ID number is: %s"%idnumber)
+            mention("Device ID number is: %s"%idnumber)
         else:
-            print("Device ID number not found. Using 000.")
+            mention("Device ID number not found. Using 000.")
             idnumber = '000'
+            all_fields_found = False
         if fwnumber:
-            print("Firmware number is: %s"%fwnumber)
+            mention("Firmware number is: %s"%fwnumber)
         else:
-            print("Firmware number not found. Using 0000.")
+            mention("Firmware number not found. Using 0000.")
             fwnumber = '0000'
+            all_fields_found = False
         if exdate:
             exdate = exdate.strftime("%Y%m%d_%H%M%S")
-            print("Extraction date is: %s"%exdate)
+            mention("Extraction date is: %s"%exdate)
         else:
-            print("Extraction date not found. Using 2000-01-01 00:00:00.")
+            mention("Extraction date not found. Using 2000-01-01 00:00:00.")
             exdate = '20010101_000000'
-        outfn = "SD%sfw%s_%s.sdb"% (idnumber, fwnumber, exdate)
-        print("Filename should be: %s"% outfn)
+            all_fields_found = False
+        if args['-f'] or all_fields_found:
+            outfn = "SD%sfw%s_%s.sdb"% (idnumber, fwnumber, exdate)
+            if args['-c']:
+                print(','.join([iid,fpdev,idnumber,fwnumber,exdate,outfn]))
+            else:
+                print(outfn)
     else:
         log("No LOG file found in System directory. Aborting.")
         exit(1)

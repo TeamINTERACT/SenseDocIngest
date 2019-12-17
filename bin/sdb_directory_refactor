@@ -26,8 +26,8 @@ Verification
 The refactored directory structure can be verified using verify_refactor.  This script creates a master list of all files in the tree and then generates a checksum fingerprint for each. If the fingerprint list for both the source and destination hierarchies are the same, then the refactoring was a success, regardless of paths and file names.  
 
 Usage:
-  refactor [options] SRCPATH DESTPATH
-  refactor -h | --help | -V | --version
+  sdb_directory_refactor [options] SRCPATH DESTPATH
+  sdb_directory_refactor -h | --help | -V | --version
 
 Options:
     -h            Display this help info
