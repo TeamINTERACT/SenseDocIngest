@@ -1,14 +1,55 @@
 What follows is a step-by-step protocol for ingesting a city/wave of data.
 
-VERIFY that all SDB folders are named in the form <IID>_<deviceid>
-VERIFY that all assignments in linkage file have associated data dirs
-VERIFY that all sdb data dirs are associated with known participants
+INGEST STEPS
+    VERIFY checksums valid for SDB dirs
+        script: exactfile-verify
+        
+    CREATE a new empty directory for working with SDB files
+        cmd: mkdir <SDBROOT>_copy
 
-ALTER linkage.csv file to conform to column names expected by verifier
-ALTER sdb filenames to 
+    COPY and MERGE the SDB file hierarchy into a duplicate tree
+        for each SDBDIR in batch dir
+            cp -rf <BATCHDIR/<SDBDIR> <SDBROOT>_copy/
 
-INGEST linkage file into sensedoc_assignments
-INGEST SDB folders
+    MERGE all SDB directories/batches into single hierarchy
+        helper script: sdb_directory_refactor on <SDBROOT>_copy
+        helper script: verify_refactor on <SDBROOT>_copy and <SDBROOT>
+        
+    VERIFY SDB folders are named in the form <IID>_<deviceid>
+        ALTER if necessary
+        helper script: sdb_generate_fname
+
+        some sdb files may not know their deviceid/revno
+        if the sdb_generate_fname script can't figure it out from the supplementary files, we may have a problem.
+
+    Since we know the SDBROOT passed its checksums, and the verify_refactor works by comparing file checksums between the original and refactored directories, we know that the files in SDBROOT_copy are all good. So we can now build a new checksum file for the unified directory which we'll use from now on.
+
+    CREATE a new, unified checksum file for <SDBROOT>_copy
+        helper script: exactfile-generate
+
+    VERIFY linkage.csv file has column names expected by verifier
+        ALTER as necessary
+
+    VERIFY .sdb files named in the form SD<DEVID>fw<REVNO>_DATESTAMP.sdb
+        ALTER if necessary
+
+
+    COPY <SDBROOT>_copy hierarchy to permanent_archive
+    COPY unified checksum file to permanent_archive
+
+    COPY linkage file to permanent_archive
+
+
+
+
+
+    VERIFY all assignments in linkage file have associated data dirs
+    VERIFY all sdb data dirs are associated with known participants
+
+    ALTER sdb filenames to 
+
+    INGEST linkage file into sensedoc_assignments
+    INGEST SDB folders
 
 Preparation
     if linkage was managed in an external file,

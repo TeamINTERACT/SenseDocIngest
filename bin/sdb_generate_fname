@@ -49,19 +49,22 @@ if __name__ == '__main__':
         iid = ''
         fpdev = ''
 
+    idnumber = ''
     logpath = ''
     syspath = os.path.join(dirpath, "System")
     if os.path.isdir(syspath):
         for file in os.listdir(syspath):
             if file.lower().startswith('log'):
                 logpath = os.path.join(syspath,file)
+                # filenames are of the form LOGNNNN.txt
+                # where NNNN is the device idnumber
+                idnumber = int(file.split('.')[0][3:])
     else:
         print("No System directory found. Aborting.")
         exit(1)
 
     if logpath:
         mention("Examining log file: %s"% logpath)
-        idnumber = ''
         fwnumber = ''
         exdate = ''
         fwline = ''
@@ -88,7 +91,7 @@ if __name__ == '__main__':
                         # fwnumber = words[-1]
                         m = re.search(fwpat,fwline)
                         if m:
-                            idnumber=m.group('id')
+                            # idnumber=m.group('id')
                             fwnumber=m.group('fw')
                     else:
                         mention("No fwline found yet.")
