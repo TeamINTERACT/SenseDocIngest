@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-This script pulls data from an SD directory and reconstructs the filename that should be applied to the SDB file from the raw source files.
+This script pulls data from an SD directory and reconstructs the filename that should be applied to the SDB file from the raw source files. If SDfw*.sdb files are present in the directory, it displays the new names for those files, respecting andy _rtc suffixes and privileging the encoded date if the generated date is null.
 
 Usage:
   sdb_generate_filename [options] DIRPATH
@@ -39,6 +39,8 @@ if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
 
     dirpath = args['DIRPATH']
+    if dirpath.endswith('/'):
+        dirpath = dirpath[:-1] #eliminate trailing /
     last = os.path.basename(dirpath)
     if all(x in '0123456789_' for x in last):
         iid,dummy,fpdev = last.partition('_')
@@ -48,6 +50,11 @@ if __name__ == '__main__':
     else:
         iid = ''
         fpdev = ''
+
+    for file in os.listdir(dirpath):
+        if file.startswith("SDfw") and file.endswith('.sdb'):
+            print("Malnamed SDB file present but not yet used to generate fname.")
+            break
 
     idnumber = ''
     logpath = ''
