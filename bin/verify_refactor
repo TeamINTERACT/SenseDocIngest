@@ -133,6 +133,7 @@ if __name__ == '__main__':
     # of the default
     if args['-L']:
         logfile = args['-L']
+        log(args) # log the args used to run the script
 
     with open(logfile, 'w') as loghandle:
         rootpath1 = args['ROOTPATH1']

@@ -25,10 +25,12 @@ Usage:
 Options:
     -h            Display this help info
     -L FNAME      Save log to FNAME
+    -t ID         Produce trace log of all decisions about user #ID
     -v,--verbose  Provide more verbose output
 """
 
 import os
+import re
 import csv
 import datetime
 from docopt import docopt
@@ -57,11 +59,24 @@ if __name__ == '__main__':
     if args['-L']:
         logfile = args['-L']
 
+    traceiid = ''
+    if args['-t']:
+        traceiid = args['-t']
+
+    def trace(curiid, msg):
+        if traceiid and curiid == traceiid:
+            print("TRACE %s: %s"%(traceiid,msg))
+
     linkage_filename = args['CSVFILE']
     root_dir = args['ROOTPATH']
 
+    # 'interact_id'
+    # 'sensedoc_serial'
+    # 'data_disposition'
+
     expected_dirs = []
     ignoring_dirs = []
+    iids_with_missing_dates = []
     with open(logfile, 'w') as loghandle:
         # CSV file has these column headers
         # MONTREAL WAVE 1 HEADER
@@ -75,27 +90,53 @@ if __name__ == '__main__':
             reader = csv.DictReader(fcsv,delimiter=',')
             # shown = False
             for rownum,row in enumerate(list(reader)):
+                # print(row.keys())
                 iid = row['interact_id']
                 if iid: 
                     # sdids = row['Sensedoc ID']
-                    sdids = row['serial']
+                    # this is technically the serial number, not an id
+                    sdids = row['sensedoc_serial']
                     if '/' in sdids:
                         log("Participant %s has multiple serial values (%s) in one record."%(iid,sdids))
                         log("WARNING: Validation will continue, but linkage file cannot be ingested until this entry has been split into multiple rows.")
+                        trace(iid,"Slash found in sdid")
+                    else:
+                        trace(iid,"No slash found in sdid")
+
 
                     for sdfw in sdids.split('/'):
-                        sdid,dum,fw = sdfw.strip().partition('-')
+                        sdid = None
+                        if '-' in sdfw: # Mtl encoded them one way
+                            sdid,dum,fw = sdfw.strip().partition('-')
+                            trace(iid,"SDID encoded with -")
+                        elif '_' in sdfw: # Ssk encoded them differently
+                            dum,dum,sdid = sdfw.strip().partition('_')
+                            trace(iid,"SDID encoded with _")
+                        else:
+                            sdid = sdfw
+                            trace(iid,"SDID not encoded with - or _")
                         if not sdid or sdid.lower() == 'na':
-                            pass
+                            trace(iid,"SDID not included")
                         elif all(x in '0123456789' for x in sdid):
                             sdid = str(int(sdid))
-                            if row['data_disposition'] == 'ingest':
-                                expected_dirs.append("%s_%s"%(iid,sdid))
-                            elif row['data_disposition'] == 'ignore':
+                            trace(iid,"SDID is %s"%sdid)
+                            # if row['data_disposition'] == 'ingest':
+                            if 'data_disposition' in row.keys() \
+                            and 'ignore' in row['data_disposition']:
+                                trace(iid,"record marked 'ignore' in linkage")
                                 ignoring_dirs.append("%s_%s"%(iid,sdid))
-                                log("Ignoring folder for %s_%s"%(iid,sdid))
+                                log("Ignoring folder for %s_%s: %s"%(iid,sdid,row['data_disposition']))
+                            else:
+                                foldername = "%s_%s"%(iid,sdid)
+                                trace(iid,"record not marked 'ignore' in linkage, so data folder %s is expected"%foldername)
+                                if not row['start_date'] or not row['end_date']:
+                                    log("INCOMPLETE WEAR-DATE RECORD: %s"%foldername)
+                                    iids_with_missing_dates.append(foldername)
+                                expected_dirs.append(foldername)
                         else:
-                            log("Participant %s has illegal SD_ID: %s"%(iid,sdid))
+                            msg = "Participant %s has illegal SD_ID: '%s'"%(iid,sdid)
+                            trace(iid,msg)
+                            log(msg)
                 else:
                     log("CSV row #%d has no iid"%rownum)
 
@@ -108,22 +149,32 @@ if __name__ == '__main__':
             path = os.path.join(root_dir, d)
             if os.path.isdir(path):
                 count_found_dirs += 1
+                # Now look in that expected dir and validate SDB fname
+                fnpat = "SD\d+fw\d+_\d+_\d+[^.]*\.[sS][dD][bB]"
+                for fn in os.listdir(path):
+                    if fn.lower().endswith('.sdb'):
+                        prob = []
+                        m = re.search(fnpat,fn)
+                        if not m:
+                            log("  BAD SDB FNAME: %s"%os.path.join(path,fn))
             else:
-                log("UNABLE TO FIND DIRECTORY: '%s'" % path)
+                log("  EXPECTED DIRECTORY MISSING: '%s'" % path)
                 count_unfound_dirs += 1
+
         # now look for unexpected directories
         count_unexpected_dirs = 0
         for child in os.listdir(root_dir):
             if not child in expected_dirs and not child in ignoring_dirs:
                 for childf in os.listdir(os.path.join(root_dir,child)):
                     if childf.endswith('.sdb'):
-                        log("DIRECTORY IS UNEXPECTED: '%s'" % child)
+                        log("  DIRECTORY IS UNEXPECTED: '%s'" % child)
                         count_unexpected_dirs += 1
                         break
 
         log("Found %d of the %d expected directories." % (count_found_dirs,len(expected_dirs)), screen=True)
         log("%d are missing." % count_unfound_dirs, screen=True)
         log("Found %d unexpected directories." % count_unexpected_dirs, screen=True)
+        log("Found %d data folders without wear-date records."%len(iids_with_missing_dates), screen=True)
 
 
 # Known problems that we can safely ignore

@@ -10,6 +10,7 @@ Usage:
 Options:
     -h            Display this help info
     -c            Show output in CSV format
+    -r            Report just the firmware revision number, if any
     -f            Force a filename output even if some fields missing
     -v,--verbose  Provide more verbose output
 """
@@ -37,6 +38,8 @@ def get_timestamp_seconds(instr):
     
 if __name__ == '__main__':
     args = docopt(__doc__, version='0.1.1')
+
+    revno_only = args['-r']
 
     dirpath = args['DIRPATH']
     if dirpath.endswith('/'):
@@ -67,8 +70,9 @@ if __name__ == '__main__':
                 # where NNNN is the device idnumber
                 idnumber = int(file.split('.')[0][3:])
     else:
-        print("No System directory found. Aborting.")
-        exit(1)
+        # print("No System directory found. Aborting.")
+        print('0000')
+        exit()
 
     if logpath:
         mention("Examining log file: %s"% logpath)
@@ -138,8 +142,14 @@ if __name__ == '__main__':
             idnumber = '000'
             all_fields_found = False
         if fwnumber:
+            if revno_only:
+                print(fwnumber)
+                exit()
             mention("Firmware number is: %s"%fwnumber)
         else:
+            if revno_only:
+                print('0000')
+                exit()
             mention("Firmware number not found. Using 0000.")
             fwnumber = '0000'
             all_fields_found = False
@@ -157,5 +167,5 @@ if __name__ == '__main__':
             else:
                 print(outfn)
     else:
-        log("No LOG file found in System directory. Aborting.")
-        exit(1)
+        print('0000')
+        exit()

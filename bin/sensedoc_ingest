@@ -29,7 +29,7 @@ Options:
     -i IID        Ingest participant IID only
     -e FNAME      Load a list of files to skip with known problems 
     -E            Display runtime environment vars and then quit 
-    -v,--verbose  Provide more verbose output
+    -v            Provide more verbose output
 """
 import os
 import re
@@ -73,7 +73,6 @@ gps_file_row_counts = {}
 
 warnings_issued = False
 def log(msg, prebreak=False, prefix='LOG'):
-    prefix = ''
     if loghandle:
         if prebreak:
             loghandle.write("\n")
@@ -81,7 +80,7 @@ def log(msg, prebreak=False, prefix='LOG'):
         loghandle.flush()
 
 def mention(str):
-    if args['--verbose']:
+    if args['-v']:
         log(str, prefix="DBG")
 
 def warn(str):
@@ -358,23 +357,32 @@ def execute_copy_via_shell(filepath, city, wave, stream, iid,
     # robust solution as it is less likely to accidentally omit data
     # by trying to be clever about skipping redundant ingests.
 
+    # Tell sqlite where the temp directory is
+    cmdline = 'SQLITE_TMPDIR=~/scratch '
+
     # Load the raw data into a temp table
-    cmdline = 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath, 
+    cmdline += 'sqlite3 %s "%s" | psql %s -q -c "%s"' % (filepath, 
                                                         selectionsql,
                                                         db_name, 
                                                         ingestcmd)
     mention("Load command line: %s" % cmdline)
     res = sub.call(cmdline, shell=True)
+    # res = sub.check_output(cmdline, shell=True,stderr=sub.STDOUT)
+    # res = res.decode('utf-8').strip()
     if res:
-        # If table load fails, the ingest for that participant should be 
-        # reported as unsuccessful.
+        # If table load fails, the ingest for that participant 
+        # should be reported as unsuccessful.
         log("Ingesting file %s failed with return code: %s"%(filepath,res))
+        print("ERR: %s"%res)
         return False
 
     if detect:
         raw_rows = count_db_rows(raw_tablename)
         filtered_rows = count_db_rows(filtered_tablename)
-        log("STATS: IID={}  SERIAL={}  TABLE={}  RAWROWS={:,} INGESTEDROWS={:,} RATE={:.1%}".format(iid, serial, tablename, raw_rows, filtered_rows, float(filtered_rows)/raw_rows)) 
+        rate = 0.0
+        if raw_rows:
+            rate =  float(filtered_rows)/raw_rows 
+        log("STATS: IID={}  SERIAL={}  TABLE={}  RAWROWS={:,} INGESTEDROWS={:,} RATE={:.1%}".format(iid, serial, tablename, raw_rows, filtered_rows, rate))
 
     if False:
         # Run the hygiene scripts on the temp table
@@ -428,12 +436,19 @@ def ingest_sdb_file(filepath,city,wave,stream,iidstr):
         log("SDB FILE '%s' was never row-counted.")
 
     log("Ingesting file: %s"%os.path.basename(filepath))
-    with sqlite3.connect(filepath) as conn:
-        # get the reference date from the SDB from which all 
-        # timestamps are measured
-        c = conn.cursor()
-        c.execute("SELECT value FROM ancillary WHERE key='refDate'")
-        refDate = c.fetchone()[0]
+    try:
+        with sqlite3.connect(filepath) as conn:
+            # get the reference date from the SDB from which all 
+            # timestamps are measured
+            c = conn.cursor()
+            sql = "SELECT value FROM ancillary WHERE key='refDate'"
+            mention("Getting refDate with: %s"%sql)
+            c.execute(sql)
+            refDate = c.fetchone()[0]
+            mention("Got refDate of: %s"%refDate)
+    except Exception as e:
+        log("Caught a SQL error while ingesting %s"%filepath)
+        log(e)
 
 
     if not refDate:
@@ -618,25 +633,38 @@ def get_participant_wear_dates(iid,city,wave,serial):
         SELECT  started_wearing as start, stopped_wearing::date + INTERVAL '27 hours' as end 
         FROM portal_dev.sensedoc_assignments
         WHERE interact_id = {iid}
-            -- some serials in table have leading 0s and others do not
-        AND sensedoc_serial ~ '0*{serial}'
         AND city_id = {city}
-        AND wave_id = {wave};
+        AND wave_id = {wave}
+        AND sensedoc_serial = {serial};
         """.format(serial=serial,city=city,wave=wave,iid=iid)
+        # This WHERE clause removed now that ids are stored as integers
+        # -- some serials in table have leading 0s and others do not
+        # AND sensedoc_serial ~ '0*{serial}'
+        # DOOFUS! Removing the 0-test was fine but removing that
+        # phrase altogether from the WHERE clause created problems.
+        # BAD PROGRAMMER! NO COOKIE FOR YOU!
+    mention("Getting wear window with sql: %s"%sql)
     wear_start = ''
     wear_end = ''
-    with psycopg2.connect(user=db_user,
-                          host=db_host,
-                          port=db_host_port,
-                          database=db_name) as conn:
-        c = conn.cursor()
-        c.execute(sql)
-        row = c.fetchone()
-        if row:
-            wear_start = row[0]
-            wear_end = row[1]
-        else:
-            log("Unable to find wear dates for serial: '%s'"%serial)
+    try:
+        with psycopg2.connect(user=db_user,
+                            host=db_host,
+                            port=db_host_port,
+                            database=db_name) as conn:
+            c = conn.cursor()
+            # log("Looking up participant wear dates with SQL:")
+            # log(sql)
+            c.execute(sql)
+            row = c.fetchone()
+            if row:
+                wear_start = row[0]
+                wear_end = row[1]
+                # log("Result was:")
+                # log(row)
+            else:
+                log("Unable to find wear dates for serial: '%s'"%serial)
+    except Exception as e:
+        err("SQL call failed: %s"%e)
     return wear_start, wear_end
 
 
